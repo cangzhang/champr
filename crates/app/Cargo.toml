@@ -2,19 +2,20 @@
 name = "champr"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+build = "build.rs"
 
 [dependencies]
 lcu = { path = "../lcu" }
 tokio = { version = "1.44.0", features = ["full"] }
-futures = "0.3.28"
+slint = "1.15"
 kv-log-macro = "1.0.7"
 femme = "2.2.1"
 anyhow = "1.0.86"
-image = "0.25.2"
-arc-swap = "1.7.1"
-rand = "0.8.5"
-freya = { git = "https://github.com/marc2332/freya.git", features = [ "network-image" ] }
-bitflags = "2.9.1"
+image = { version = "0.25.2", default-features = false, features = ["png"] }
 futures-util = "0.3.31"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+
+[build-dependencies]
+slint-build = "1.15"

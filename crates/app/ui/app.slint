@@ -1,0 +1,301 @@
+import { VerticalBox, HorizontalBox, ListView, CheckBox, Button, ComboBox } from "std-widgets.slint";
+
+// ---------------------------------------------------------------------------
+//  Data models
+// ---------------------------------------------------------------------------
+
+export struct SourceItemModel {
+    label: string,
+    value: string,
+    selected: bool,
+}
+
+export struct RuneModel {
+    /// Display index (for identification in callbacks)
+    index: int,
+    name: string,
+    position: string,
+    pick-count: int,
+    win-rate: string,
+    primary-style-id: int,
+    sub-style-id: int,
+}
+
+// ---------------------------------------------------------------------------
+//  SourcesWindow – source selection, Apply Builds, LCU status
+// ---------------------------------------------------------------------------
+
+export component SourcesWindow inherits Window {
+    title: "ChampR";
+    preferred-width: 500px;
+    preferred-height: 640px;
+
+    // --- properties ---
+    in-out property <string> status: "loading";          // "loading" | "success" | "error"
+    in-out property <[SourceItemModel]> sources;
+    in-out property <string> lcu-status: "disconnected"; // "disconnected" | "connected"
+    in-out property <string> lcu-summoner: "";
+    in-out property <bool> applying-builds: false;
+    in-out property <string> apply-status: "";           // "", "Applying…", "Done! (N champions)", "Error: …"
+
+    // --- callbacks ---
+    callback source-toggled(int, bool);
+    callback apply-builds-clicked();
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+
+        // Header
+        Text {
+            text: "ChampR";
+            font-size: 28px;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Builds, runes, all in one";
+            font-size: 13px;
+            horizontal-alignment: center;
+            color: #888888;
+        }
+
+        // LCU connection status bar
+        HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: root.lcu-status == "connected" ? #22cc44 : #cc3333;
+            }
+            Text {
+                text: root.lcu-status == "connected"
+                    ? "League Client: " + root.lcu-summoner
+                    : "League Client not detected";
+                font-size: 13px;
+                color: root.lcu-status == "connected" ? #22cc44 : #cc3333;
+                vertical-alignment: center;
+            }
+        }
+
+        // Source list
+        if root.status == "loading" : HorizontalBox {
+            alignment: center;
+            Text {
+                text: "Loading sources…";
+                font-size: 14px;
+                color: #888888;
+            }
+        }
+
+        if root.status == "error" : Text {
+            text: "Failed to load source list. Check your network.";
+            font-size: 14px;
+            horizontal-alignment: center;
+            color: #cc3333;
+        }
+
+        if root.status == "success" : ListView {
+            for source[index] in root.sources : HorizontalBox {
+                padding-top: 4px;
+                padding-bottom: 4px;
+                spacing: 8px;
+
+                CheckBox {
+                    text: source.label;
+                    checked: source.selected;
+                    toggled => {
+                        root.source-toggled(index, self.checked);
+                    }
+                }
+            }
+        }
+
+        // Apply Builds button + status
+        HorizontalBox {
+            alignment: center;
+            spacing: 12px;
+
+            Button {
+                text: root.applying-builds ? "Applying…" : "Apply Builds";
+                enabled: !root.applying-builds && root.lcu-status == "connected";
+                clicked => {
+                    root.apply-builds-clicked();
+                }
+            }
+        }
+
+        if root.apply-status != "" : Text {
+            text: root.apply-status;
+            font-size: 13px;
+            horizontal-alignment: center;
+            color: #666666;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  RunesWindow – champion runes overlay with source picker + apply buttons
+// ---------------------------------------------------------------------------
+
+export component RunesWindow inherits Window {
+    title: "Runes";
+    preferred-width: 500px;
+    preferred-height: 640px;
+
+    // --- properties ---
+    in-out property <int> champion-id: 0;
+    in-out property <string> champion-name: "";
+    in-out property <image> champion-avatar;
+    in-out property <bool> has-champion: false;
+    in-out property <[string]> source-names;
+    in-out property <int> current-source-index: 0;
+    in-out property <[RuneModel]> runes;
+    in-out property <string> rune-status: "";  // "" | "loading" | "error" | "success"
+    in-out property <string> apply-rune-status: "";
+
+    // --- callbacks ---
+    callback close-requested();
+    callback source-changed(int);
+    callback apply-rune-clicked(int);
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+
+        // Champion header
+        if root.has-champion : HorizontalBox {
+            spacing: 12px;
+            alignment: center;
+
+            Image {
+                source: root.champion-avatar;
+                width: 64px;
+                height: 64px;
+            }
+
+            VerticalBox {
+                alignment: center;
+                Text {
+                    text: root.champion-name != "" ? root.champion-name : "Champion " + root.champion-id;
+                    font-size: 22px;
+                    font-weight: 600;
+                }
+            }
+        }
+
+        // Source picker
+        if root.has-champion : HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+
+            Text {
+                text: "Source:";
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+            ComboBox {
+                model: root.source-names;
+                current-index <=> root.current-source-index;
+                selected(value) => {
+                    root.source-changed(root.current-source-index);
+                }
+            }
+        }
+
+        // Rune list
+        if root.rune-status == "loading" : Text {
+            text: "Loading runes…";
+            font-size: 14px;
+            horizontal-alignment: center;
+            color: #888888;
+        }
+
+        if root.rune-status == "error" : Text {
+            text: "Failed to load runes for this champion.";
+            font-size: 14px;
+            horizontal-alignment: center;
+            color: #cc3333;
+        }
+
+        if root.rune-status == "success" : ListView {
+            for rune[index] in root.runes : Rectangle {
+                border-width: 1px;
+                border-color: #dddddd;
+                border-radius: 6px;
+                background: #fafafa;
+                height: 72px;
+
+                HorizontalBox {
+                    padding: 8px;
+                    spacing: 8px;
+                    alignment: stretch;
+
+                    VerticalBox {
+                        alignment: center;
+                        spacing: 2px;
+
+                        Text {
+                            text: rune.name != "" ? rune.name : rune.position;
+                            font-size: 14px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+
+                        HorizontalBox {
+                            spacing: 12px;
+                            Text {
+                                text: "Picks: " + rune.pick-count;
+                                font-size: 12px;
+                                color: #666666;
+                            }
+                            Text {
+                                text: "WR: " + rune.win-rate;
+                                font-size: 12px;
+                                color: #666666;
+                            }
+                        }
+
+                        Text {
+                            text: rune.position;
+                            font-size: 11px;
+                            color: #999999;
+                        }
+                    }
+
+                    VerticalBox {
+                        alignment: center;
+                        Button {
+                            text: "Apply";
+                            clicked => {
+                                root.apply-rune-clicked(rune.index);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply rune feedback
+        if root.apply-rune-status != "" : Text {
+            text: root.apply-rune-status;
+            font-size: 13px;
+            horizontal-alignment: center;
+            color: #666666;
+        }
+
+        // Close
+        HorizontalBox {
+            alignment: center;
+            Button {
+                text: "Close";
+                clicked => {
+                    root.close-requested();
+                }
+            }
+        }
+    }
+}
