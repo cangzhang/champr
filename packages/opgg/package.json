@@ -1,0 +1,25 @@
+{
+  "name": "opgg",
+  "version": "1.0.0",
+  "description": "OP.GG crawler for League of Legends champion builds and runes",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "crawl": "tsx src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.30.2",
+  "dependencies": {
+    "crawlee": "^3.16.0",
+    "playwright": "^1.52.0",
+    "nanoid": "^5.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}

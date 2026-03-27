@@ -9,3 +9,7 @@ logs/
 .settings.toml
 .local_builds/
 .npm/
+node_modules
+**/*/dist/
+**/*/output/
+**/*/storage/
