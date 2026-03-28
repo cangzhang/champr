@@ -1,23 +1,37 @@
-import { crawlChampions } from './crawler.js';
-import type { CrawlerOptions } from './types.js';
+import { crawlChampions, fetchChampionList } from './crawler.js';
+import type { CrawlerOptions, GameMode } from './types.js';
+
+const VALID_MODES: ReadonlySet<string> = new Set(['ranked', 'aram', 'urf', 'aram-mayhem']);
 
 /**
  * OP.GG Crawler for League of Legends champion builds.
  *
  * Usage:
- *   # Single champion
+ *   # Single champion (ranked by default)
  *   pnpm start leesin
- *   pnpm start leesin --region=kr --tier=diamond_plus --type=flex
+ *   pnpm start leesin --region=kr --tier=diamond_plus
+ *
+ *   # ARAM mode
+ *   pnpm start leesin --mode=aram
+ *
+ *   # URF mode
+ *   pnpm start leesin --mode=urf
+ *
+ *   # ARAM Mayhem mode
+ *   pnpm start leesin --mode=aram-mayhem
  *
  *   # Multiple champions
- *   pnpm start leesin,yasuo,zed
+ *   pnpm start leesin,yasuo,zed --mode=aram
  *
  *   # Batch mode with a champion list file (one champion per line)
- *   pnpm start --file=champions.txt
+ *   pnpm start --file=champions.txt --mode=aram
  *
- *   # All champions from Data Dragon
- *   pnpm start --all --region=kr
+ *   # All champions (fetched from OP.GG)
+ *   pnpm start --all --mode=aram
  */
+
+/** Tracks whether --all was explicitly requested */
+let allModeRequested = false;
 
 function parseArgs(argv: string[]): CrawlerOptions {
   const args = argv.slice(2);
@@ -30,8 +44,13 @@ function parseArgs(argv: string[]): CrawlerOptions {
       options.region = arg.split('=')[1];
     } else if (arg.startsWith('--tier=')) {
       options.tier = arg.split('=')[1];
-    } else if (arg.startsWith('--type=')) {
-      options.queueType = arg.split('=')[1];
+    } else if (arg.startsWith('--mode=')) {
+      const mode = arg.split('=')[1];
+      if (!VALID_MODES.has(mode)) {
+        console.error(`Invalid mode: ${mode}. Valid modes: ${[...VALID_MODES].join(', ')}`);
+        process.exit(1);
+      }
+      options.mode = mode as GameMode;
     } else if (arg.startsWith('--output=')) {
       options.outputDir = arg.split('=')[1];
     } else if (arg.startsWith('--concurrency=')) {
@@ -45,7 +64,8 @@ function parseArgs(argv: string[]): CrawlerOptions {
         .map((line: string) => line.trim())
         .filter((line: string) => line && !line.startsWith('#'));
     } else if (arg === '--all') {
-      // Fetch all champion names from Data Dragon
+      // Will fetch champion list from OP.GG
+      allModeRequested = true;
       options.champions = []; // Will be populated below
     } else if (arg.startsWith('--')) {
       console.error(`Unknown option: ${arg}`);
@@ -67,24 +87,27 @@ function parseArgs(argv: string[]): CrawlerOptions {
   return options;
 }
 
-async function fetchAllChampions(): Promise<string[]> {
-  const url =
-    'https://ddragon.leagueoflegends.com/cdn/15.6.1/data/en_US/champion.json';
-  const resp = await fetch(url);
-  const data = (await resp.json()) as {
-    data: Record<string, { id: string }>;
-  };
-  return Object.values(data.data).map((c) => c.id.toLowerCase());
-}
-
 async function main() {
   const options = parseArgs(process.argv);
 
-  // Handle --all flag
-  if (options.champions && options.champions.length === 0 && !options.champion) {
-    console.log('[opgg] Fetching champion list from Data Dragon...');
-    options.champions = await fetchAllChampions();
-    console.log(`[opgg] Found ${options.champions.length} champions`);
+  // Set defaults early so fetchChampionList can use them
+  options.region ??= 'kr';
+  options.tier ??= 'diamond_plus';
+  options.mode ??= 'ranked';
+  options.outputDir ??= './output';
+  options.concurrency ??= 3;
+
+  // Handle --all flag: fetch champion list + tiers from OP.GG
+  if (allModeRequested) {
+    console.log('[opgg] Fetching champion list from OP.GG...');
+    const { champions, tiers } = await fetchChampionList(
+      options.mode,
+      options.region,
+      options.tier,
+    );
+    options.champions = champions;
+    options.championTiers = tiers;
+    console.log(`[opgg] Found ${champions.length} champions with tier data`);
   }
 
   // Validate we have something to crawl
@@ -101,33 +124,30 @@ Usage:
 Options:
   --region=<region>        Region (default: kr)
   --tier=<tier>            Tier (default: diamond_plus)
-  --type=<type>            Queue type: ranked, flex (default: ranked)
+  --mode=<mode>            Game mode: ranked, aram, urf, aram-mayhem (default: ranked)
   --output=<dir>           Output directory (default: ./output)
   --concurrency=<n>        Max concurrent browsers (default: 3)
 
 Examples:
   pnpm start leesin
-  pnpm start leesin --region=kr --tier=diamond_plus --type=flex
-  pnpm start leesin,yasuo,zed --output=./builds
-  pnpm start --all --concurrency=5
+  pnpm start leesin --mode=aram
+  pnpm start leesin --mode=urf
+  pnpm start leesin --mode=aram-mayhem
+  pnpm start leesin --region=kr --tier=diamond_plus
+  pnpm start leesin,yasuo,zed --mode=aram --output=./builds
+  pnpm start --all --mode=aram --concurrency=5
 `);
     process.exit(1);
   }
-
-  // Set defaults
-  options.region ??= 'kr';
-  options.tier ??= 'diamond_plus';
-  options.queueType ??= 'ranked';
-  options.outputDir ??= './output';
-  options.concurrency ??= 3;
 
   console.log('[opgg] Configuration:', {
     champions: options.champion || options.champions,
     region: options.region,
     tier: options.tier,
-    queueType: options.queueType,
+    mode: options.mode,
     outputDir: options.outputDir,
     concurrency: options.concurrency,
+    hasTierData: options.championTiers ? options.championTiers.size > 0 : false,
   });
 
   const results = await crawlChampions(options);
@@ -135,7 +155,10 @@ Examples:
   // Print summary
   console.log('\n[opgg] === Results Summary ===');
   for (const section of results) {
-    console.log(`\n  ${section.alias}:`);
+    console.log(`\n  ${section.alias} (mode: ${options.mode}):`);
+    if (section.championTier) {
+      console.log(`    Champion Tier: ${section.championTier}`);
+    }
     console.log(`    Runes: ${section.runes.length} page(s)`);
     for (const rune of section.runes) {
       console.log(
@@ -156,7 +179,7 @@ main().catch((err) => {
   process.exit(1);
 });
 
-export { crawlChampions, buildUrl } from './crawler.js';
+export { crawlChampions, buildUrl, fetchChampionList } from './crawler.js';
 export { parseBuildPage } from './parser.js';
 export { transformPageData, transformRunes, transformItemBuilds } from './transform.js';
 export type * from './types.js';

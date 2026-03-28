@@ -1,0 +1,108 @@
+name: OP.GG Crawl
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Game mode to crawl"
+        required: true
+        type: choice
+        options:
+          - ranked
+          - aram
+          - urf
+          - aram-mayhem
+          - all
+        default: ranked
+      champions:
+        description: "Champion list (comma-separated, empty = all champions)"
+        required: false
+        type: string
+        default: ""
+      region:
+        description: "Region"
+        required: false
+        type: string
+        default: kr
+      tier:
+        description: "Tier"
+        required: false
+        type: string
+        default: diamond_plus
+      concurrency:
+        description: "Max concurrent browsers"
+        required: false
+        type: string
+        default: "3"
+
+jobs:
+  # Resolve the mode input into a JSON matrix array
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      modes: ${{ steps.set-modes.outputs.modes }}
+    steps:
+      - id: set-modes
+        run: |
+          if [ "${{ inputs.mode }}" = "all" ]; then
+            echo 'modes=["ranked","aram","urf","aram-mayhem"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'modes=["${{ inputs.mode }}"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  crawl:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: ${{ fromJson(needs.prepare.outputs.modes) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+        working-directory: packages/opgg
+
+      - name: Run crawler
+        working-directory: packages/opgg
+        run: |
+          ARGS=""
+
+          # Champion selection: specific list or --all
+          if [ -n "${{ inputs.champions }}" ]; then
+            ARGS="${{ inputs.champions }}"
+          else
+            ARGS="--all"
+          fi
+
+          ARGS="$ARGS --mode=${{ matrix.mode }}"
+          ARGS="$ARGS --region=${{ inputs.region }}"
+          ARGS="$ARGS --tier=${{ inputs.tier }}"
+          ARGS="$ARGS --concurrency=${{ inputs.concurrency }}"
+          ARGS="$ARGS --output=./output/${{ matrix.mode }}"
+
+          echo "[ci] Running: pnpm start $ARGS"
+          pnpm start $ARGS
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opgg-${{ matrix.mode }}
+          path: packages/opgg/output/${{ matrix.mode }}/
+          if-no-files-found: warn
+          retention-days: 30

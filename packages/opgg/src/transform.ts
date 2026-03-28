@@ -3,6 +3,7 @@ import type {
   OpggPageData,
   OpggRunePage,
   OpggItemBuilds,
+  GameMode,
   LcuRune,
   LcuItemBuild,
   LcuBlock,
@@ -12,6 +13,35 @@ import type {
 
 const SOURCE_NAME = 'op.gg';
 const SUMMONERS_RIFT_MAP_ID = 11;
+const HOWLING_ABYSS_MAP_ID = 12;
+
+/** Get the map ID(s) for a given game mode */
+function getMapIds(mode: GameMode): number[] {
+  switch (mode) {
+    case 'aram':
+    case 'aram-mayhem':
+      return [HOWLING_ABYSS_MAP_ID];
+    case 'urf':
+    case 'ranked':
+    default:
+      return [SUMMONERS_RIFT_MAP_ID];
+  }
+}
+
+/** Get a display label for the mode */
+function getModeLabel(mode: GameMode): string {
+  switch (mode) {
+    case 'aram':
+      return 'ARAM';
+    case 'urf':
+      return 'URF';
+    case 'aram-mayhem':
+      return 'ARAM Mayhem';
+    case 'ranked':
+    default:
+      return '';
+  }
+}
 
 /**
  * Transform an OP.GG rune page into the LCU Rune format.
@@ -44,12 +74,18 @@ function transformRunePage(
  * Transform 2 OP.GG rune pages into 2 LCU Rune objects:
  * - First: "Most Popular" (highest pick rate)
  * - Second: "Highest Win Rate" (other rune page, often higher WR)
+ *
+ * For ARAM Mayhem mode, returns empty array (no runes stored).
  */
 export function transformRunes(
   runePages: OpggRunePage[],
   champion: string,
   position: string,
+  mode: GameMode = 'ranked',
 ): LcuRune[] {
+  // ARAM Mayhem has no runes
+  if (mode === 'aram-mayhem') return [];
+
   if (runePages.length === 0) return [];
 
   const runes: LcuRune[] = [];
@@ -81,14 +117,21 @@ function makeItem(itemId: number): LcuItem {
 /**
  * Transform OP.GG item builds into the Riot item set JSON format.
  * This produces JSON files that LoL client reads from Config/Champions/{alias}/Recommended/
+ *
+ * For ARAM Mayhem mode, win rate stats are omitted from block labels.
  */
 export function transformItemBuilds(
   itemBuilds: OpggItemBuilds,
   champion: string,
   position: string,
   championId?: number,
+  mode: GameMode = 'ranked',
 ): LcuItemBuild[] {
   const builds: LcuItemBuild[] = [];
+  const mapIds = getMapIds(mode);
+  const modeLabel = getModeLabel(mode);
+  const modeTag = modeLabel ? ` ${modeLabel}` : '';
+  const hideWR = mode === 'aram-mayhem';
 
   // --- Build 1: Most Popular Full Build ---
   // Uses the most popular option from each category
@@ -98,7 +141,9 @@ export function transformItemBuilds(
   if (itemBuilds.starterItems.length > 0) {
     const top = itemBuilds.starterItems[0];
     blocks.push({
-      type: `Starter Items :: ${top.win_rate}% WR - ${top.play} Games`,
+      type: hideWR
+        ? `Starter Items :: ${top.play} Games`
+        : `Starter Items :: ${top.win_rate}% WR - ${top.play} Games`,
       items: top.items.map((item) => makeItem(item.id)),
     });
   }
@@ -126,7 +171,9 @@ export function transformItemBuilds(
   // Boots - all options
   if (itemBuilds.boots.length > 0) {
     blocks.push({
-      type: `Boots :: ${itemBuilds.boots[0].win_rate}% WR`,
+      type: hideWR
+        ? 'Boots'
+        : `Boots :: ${itemBuilds.boots[0].win_rate}% WR`,
       items: itemBuilds.boots.map((b) => makeItem(b.item.id)),
     });
   }
@@ -135,7 +182,9 @@ export function transformItemBuilds(
   if (itemBuilds.coreBuilds.length > 0) {
     const top = itemBuilds.coreBuilds[0];
     blocks.push({
-      type: `Core Build :: ${top.win_rate}% WR - ${top.play} Games`,
+      type: hideWR
+        ? `Core Build :: ${top.play} Games`
+        : `Core Build :: ${top.win_rate}% WR - ${top.play} Games`,
       items: top.items.map((item) => makeItem(item.id)),
     });
   }
@@ -144,7 +193,9 @@ export function transformItemBuilds(
   for (let i = 1; i < Math.min(itemBuilds.coreBuilds.length, 4); i++) {
     const build = itemBuilds.coreBuilds[i];
     blocks.push({
-      type: `Core Build #${i + 1} :: ${build.win_rate}% WR - ${build.play} Games`,
+      type: hideWR
+        ? `Core Build #${i + 1} :: ${build.play} Games`
+        : `Core Build #${i + 1} :: ${build.win_rate}% WR - ${build.play} Games`,
       items: build.items.map((item) => makeItem(item.id)),
     });
   }
@@ -173,18 +224,21 @@ export function transformItemBuilds(
     });
   }
 
-  builds.push({
-    title: `[OP.GG] ${champion} - ${position || 'Build'}`,
-    associatedMaps: [SUMMONERS_RIFT_MAP_ID],
-    associatedChampions: championId ? [championId] : [],
-    blocks,
-    map: 'any',
-    mode: 'any',
-    preferredItemSlots: [],
-    sortrank: 0,
-    startedFrom: 'heuristic',
-    type: 'custom',
-  });
+  // Only push build 1 if it has any blocks
+  if (blocks.length > 0) {
+    builds.push({
+      title: `[OP.GG] ${champion}${modeTag} - ${position || 'Build'}`,
+      associatedMaps: mapIds,
+      associatedChampions: championId ? [championId] : [],
+      blocks,
+      map: 'any',
+      mode: 'any',
+      preferredItemSlots: [],
+      sortrank: 0,
+      startedFrom: 'heuristic',
+      type: 'custom',
+    });
+  }
 
   // --- Build 2: Highest Win Rate Build ---
   // Uses the highest WR option from each category
@@ -196,7 +250,9 @@ export function transformItemBuilds(
       (a, b) => b.win_rate - a.win_rate,
     )[0];
     wrBlocks.push({
-      type: `Starter Items :: ${bestWR.win_rate}% WR - ${bestWR.play} Games`,
+      type: hideWR
+        ? `Starter Items :: ${bestWR.play} Games`
+        : `Starter Items :: ${bestWR.win_rate}% WR - ${bestWR.play} Games`,
       items: bestWR.items.map((item) => makeItem(item.id)),
     });
   }
@@ -207,7 +263,9 @@ export function transformItemBuilds(
       (a, b) => b.win_rate - a.win_rate,
     )[0];
     wrBlocks.push({
-      type: `Boots :: ${bestWR.win_rate}% WR`,
+      type: hideWR
+        ? 'Boots'
+        : `Boots :: ${bestWR.win_rate}% WR`,
       items: [makeItem(bestWR.item.id)],
     });
   }
@@ -218,7 +276,9 @@ export function transformItemBuilds(
       (a, b) => b.win_rate - a.win_rate,
     )[0];
     wrBlocks.push({
-      type: `Core Build :: ${bestWR.win_rate}% WR - ${bestWR.play} Games`,
+      type: hideWR
+        ? `Core Build :: ${bestWR.play} Games`
+        : `Core Build :: ${bestWR.win_rate}% WR - ${bestWR.play} Games`,
       items: bestWR.items.map((item) => makeItem(item.id)),
     });
   }
@@ -256,18 +316,21 @@ export function transformItemBuilds(
     });
   }
 
-  builds.push({
-    title: `[OP.GG] ${champion} - ${position || 'Build'} (Highest WR)`,
-    associatedMaps: [SUMMONERS_RIFT_MAP_ID],
-    associatedChampions: championId ? [championId] : [],
-    blocks: wrBlocks,
-    map: 'any',
-    mode: 'any',
-    preferredItemSlots: [],
-    sortrank: 1,
-    startedFrom: 'heuristic',
-    type: 'custom',
-  });
+  // Only push build 2 if it has any blocks
+  if (wrBlocks.length > 0) {
+    builds.push({
+      title: `[OP.GG] ${champion}${modeTag} - ${position || 'Build'} (Highest WR)`,
+      associatedMaps: mapIds,
+      associatedChampions: championId ? [championId] : [],
+      blocks: wrBlocks,
+      map: 'any',
+      mode: 'any',
+      preferredItemSlots: [],
+      sortrank: 1,
+      startedFrom: 'heuristic',
+      type: 'custom',
+    });
+  }
 
   return builds;
 }
@@ -277,12 +340,22 @@ export function transformItemBuilds(
  */
 export function transformPageData(data: OpggPageData): LcuBuildSection {
   const position = ''; // OP.GG /build page is the default position
-  const runes = transformRunes(data.runePages, data.champion, position);
-  const itemBuilds = transformItemBuilds(data.itemBuilds, data.champion, position);
+  const runes = transformRunes(data.runePages, data.champion, position, data.mode);
+  const itemBuilds = transformItemBuilds(
+    data.itemBuilds,
+    data.champion,
+    position,
+    undefined,
+    data.mode,
+  );
+
+  const modeLabel = getModeLabel(data.mode);
+  // For non-ranked modes, use the mode as the ID suffix
+  const idSuffix = data.mode === 'ranked' ? 'ranked' : data.mode;
 
   return {
     index: 0,
-    id: `opgg-${data.champion}-${data.queueType}`,
+    id: `opgg-${data.champion}-${idSuffix}`,
     version: data.version,
     officialVersion: data.officialVersion,
     pickCount: data.runePages[0]?.play ?? 0,
@@ -295,6 +368,7 @@ export function transformPageData(data: OpggPageData): LcuBuildSection {
     position,
     skills: null,
     spells: null,
+    championTier: data.championTier,
     itemBuilds,
     runes,
   };

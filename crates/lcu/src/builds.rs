@@ -28,6 +28,7 @@ pub struct BuildSection {
     pub position: String,
     pub skills: Option<Vec<String>>,
     pub spells: Option<Vec<String>>,
+    pub champion_tier: Option<String>,
     pub item_builds: Vec<ItemBuild>,
     pub runes: Vec<Rune>,
 }

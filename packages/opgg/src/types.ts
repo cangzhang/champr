@@ -113,18 +113,24 @@ export interface OpggItemBuilds {
   sixthItems: OpggDepthItemRow[];
 }
 
+/** Supported game modes */
+export type GameMode = 'ranked' | 'aram' | 'urf' | 'aram-mayhem';
+
 /** Full parsed data from one champion's build page */
 export interface OpggPageData {
   champion: string;
   region: string;
   tier: string;
-  queueType: string;
+  /** Game mode: ranked, aram, urf, aram-mayhem */
+  mode: GameMode;
   /** Display patch version from page, e.g. "16.06" */
   version: string;
   /** Data Dragon / official version from image URLs, e.g. "16.6.1" */
   officialVersion: string;
   runePages: OpggRunePage[];
   itemBuilds: OpggItemBuilds;
+  /** Champion tier from the page, e.g. "1", "2", "OP", "S" */
+  championTier: string | null;
 }
 
 // ============================================================
@@ -187,6 +193,7 @@ export interface LcuBuildSection {
   position: string;
   skills: string[] | null;
   spells: string[] | null;
+  championTier: string | null;
   itemBuilds: LcuItemBuild[];
   runes: LcuRune[];
 }
@@ -197,8 +204,9 @@ export interface CrawlerOptions {
   champions?: string[];    // batch mode: list of champion aliases
   region?: string;         // default: "kr"
   tier?: string;           // default: "diamond_plus"
-  queueType?: string;      // default: "ranked" (solo), also "flex"
+  mode?: GameMode;         // default: "ranked" (also: aram, urf, aram-mayhem)
   outputDir?: string;      // default: "./output"
   concurrency?: number;    // default: 3
   position?: string;       // default: "" (all positions from page)
+  championTiers?: Map<string, number>; // pre-fetched tier map from OP.GG champion list
 }

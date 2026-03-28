@@ -7,6 +7,7 @@ import type {
   OpggCoreBuildRow,
   OpggDepthItemRow,
   OpggPageData,
+  GameMode,
 } from './types.js';
 
 /**
@@ -64,7 +65,19 @@ function parseRunePages(chunks: string[]): OpggRunePage[] {
     }
   }
 
-  throw new Error('Failed to parse rune_pages from RSC data');
+  throw new Error('Failed to parse rune_pages from RSC data (no rune_pages found in any chunk)');
+}
+
+/**
+ * Try to parse rune pages, returning empty array if not found.
+ * Some modes (ARAM Mayhem) may not have rune data.
+ */
+function tryParseRunePages(chunks: string[]): OpggRunePage[] {
+  try {
+    return parseRunePages(chunks);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -316,26 +329,156 @@ async function parseVersion(page: Page): Promise<{ version: string; officialVers
   `) as Promise<{ version: string; officialVersion: string }>;
 }
 
+/** Champion info extracted from OP.GG champion list in RSC data */
+export interface OpggChampionInfo {
+  key: string;    // URL slug, e.g. "leesin"
+  name: string;   // Display name, e.g. "Lee Sin"
+  tier: number;   // Tier integer 1-5
+}
+
+/**
+ * Extract the full champion list from a mode page's RSC data.
+ * Mode pages (ARAM, URF, etc.) have a sidebar component with a "champions":[...] array
+ * containing every champion with key, name, tier, etc.
+ */
+export async function extractModeChampionList(page: Page): Promise<OpggChampionInfo[]> {
+  const chunks = await extractRscChunks(page);
+
+  for (const chunk of chunks) {
+    // Look for the champions array in RSC props
+    const idx = chunk.indexOf('"champions":[');
+    if (idx === -1) continue;
+
+    // Find the start of the array
+    const arrayStart = chunk.indexOf('[', idx);
+    if (arrayStart === -1) continue;
+
+    const jsonStr = extractBalancedJson(chunk, arrayStart);
+    if (!jsonStr) continue;
+
+    try {
+      const champions = JSON.parse(jsonStr) as Array<{
+        key?: string;
+        name?: string;
+        tier?: number;
+        id?: number;
+      }>;
+
+      if (!Array.isArray(champions) || champions.length === 0) continue;
+      // Validate it looks like champion data
+      if (!champions[0].key || champions[0].tier === undefined) continue;
+
+      return champions
+        .filter((c) => c.key && c.name && typeof c.tier === 'number')
+        .map((c) => ({
+          key: c.key!,
+          name: c.name!,
+          tier: c.tier!,
+        }));
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error('Failed to extract champion list from mode page RSC data');
+}
+
+/**
+ * Extract the full champion list from the ranked tier list page's RSC data.
+ * The ranked tier list page (/lol/champions?region=...&tier=...) has a "data":[...] array
+ * where each entry has key, name, positionTier, etc. Same champion may appear multiple times
+ * for different positions — we deduplicate and take the best (lowest) tier.
+ */
+export async function extractRankedChampionList(page: Page): Promise<OpggChampionInfo[]> {
+  const chunks = await extractRscChunks(page);
+
+  for (const chunk of chunks) {
+    // Look for "data":[ with positionName fields (distinguishes from other "data" arrays)
+    const idx = chunk.indexOf('"positionName"');
+    if (idx === -1) continue;
+
+    // Search backwards from positionName to find the containing "data":[ array
+    // Walk back to find "data":[
+    let searchStart = idx;
+    let dataIdx = -1;
+    while (searchStart > 0) {
+      dataIdx = chunk.lastIndexOf('"data":[', searchStart);
+      if (dataIdx !== -1) break;
+      searchStart -= 1000;
+    }
+    if (dataIdx === -1) continue;
+
+    const arrayStart = chunk.indexOf('[', dataIdx);
+    if (arrayStart === -1) continue;
+
+    const jsonStr = extractBalancedJson(chunk, arrayStart);
+    if (!jsonStr) continue;
+
+    try {
+      const data = JSON.parse(jsonStr) as Array<{
+        key?: string;
+        name?: string;
+        positionName?: string;
+        positionTierData?: { tier?: number; rank?: number };
+      }>;
+
+      if (!Array.isArray(data) || data.length === 0) continue;
+      if (!data[0].key || !data[0].positionName) continue;
+
+      // Deduplicate by champion key, keeping the best (lowest) tier
+      const tierMap = new Map<string, { name: string; tier: number }>();
+
+      for (const entry of data) {
+        if (!entry.key || !entry.name) continue;
+        const tier = entry.positionTierData?.tier ?? 5;
+        const existing = tierMap.get(entry.key);
+        if (!existing || tier < existing.tier) {
+          tierMap.set(entry.key, { name: entry.name, tier });
+        }
+      }
+
+      return Array.from(tierMap.entries()).map(([key, { name, tier }]) => ({
+        key,
+        name,
+        tier,
+      }));
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error('Failed to extract champion list from ranked tier list page RSC data');
+}
+
 /**
  * Main parser: extract all build data from an OP.GG champion build page.
+ * Supports ranked and alternative game modes (ARAM, URF, ARAM Mayhem).
+ * Note: championTier is set to null here — caller should override from pre-fetched tier map.
  */
 export async function parseBuildPage(
   page: Page,
   champion: string,
   region: string,
   tier: string,
-  queueType: string,
+  mode: GameMode = 'ranked',
 ): Promise<OpggPageData> {
-  // Wait for the rune section to be visible (indicates page is loaded)
-  await page.waitForSelector('img[src*="/perk/"]', { timeout: 15000 });
-  // Also wait for item tables
-  await page.waitForSelector('img[src*="/item/"]', { timeout: 15000 });
+  // Wait for page content to load.
+  // Some modes (ARAM Mayhem) may have sparse data, so we use a more lenient approach.
+  const hasPerks = await page.waitForSelector('img[src*="/perk/"]', { timeout: 15000 }).then(() => true).catch(() => false);
+  const hasItems = await page.waitForSelector('img[src*="/item/"]', { timeout: 10000 }).then(() => true).catch(() => false);
+
+  if (!hasPerks && !hasItems) {
+    // If neither runes nor items loaded, wait a bit for any content
+    await page.waitForTimeout(3000);
+  }
 
   // Extract RSC chunks for rune data
   const chunks = await extractRscChunks(page);
-  const runePages = parseRunePages(chunks);
 
-  // Extract item builds from DOM
+  // For some modes, rune data may be absent - use graceful parsing
+  const runePages = tryParseRunePages(chunks);
+
+  // Extract item builds from DOM (returns empty categories if tables are missing)
   const itemBuilds = await parseItemBuilds(page);
 
   // Extract patch version
@@ -345,12 +488,13 @@ export async function parseBuildPage(
     champion,
     region,
     tier,
-    queueType,
+    mode,
     version,
     officialVersion,
     runePages,
     itemBuilds,
+    championTier: null, // Set by caller from pre-fetched tier map
   };
 }
 
-export { extractRscChunks, parseRunePages, parseItemBuilds };
+export { extractRscChunks, parseRunePages, parseItemBuilds, extractBalancedJson };
