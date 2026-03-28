@@ -150,9 +150,9 @@ Examples:
     hasTierData: options.championTiers ? options.championTiers.size > 0 : false,
   });
 
-  const results = await crawlChampions(options);
+  const { results, report } = await crawlChampions(options);
 
-  // Print summary
+  // Print per-champion detail for successful/partial crawls
   console.log('\n[opgg] === Results Summary ===');
   for (const section of results) {
     console.log(`\n  ${section.alias} (mode: ${options.mode}):`);
@@ -171,7 +171,27 @@ Examples:
     }
   }
 
-  console.log(`\n[opgg] Output written to: ${options.outputDir}`);
+  // Print structured status table from the crawl report
+  console.log('\n[opgg] === Crawl Status ===');
+  console.log(`  ${'Champion'.padEnd(20)} ${'Status'.padEnd(9)} ${'Runes'.padEnd(6)} ${'Items'.padEnd(6)} Note`);
+  console.log(`  ${'-'.repeat(70)}`);
+  for (const entry of report.champions) {
+    const statusLabel =
+      entry.status === 'success' ? 'SUCCESS' :
+      entry.status === 'partial' ? 'PARTIAL' : 'FAILED ';
+    const note = entry.reason ?? '';
+    console.log(
+      `  ${entry.champion.padEnd(20)} ${statusLabel.padEnd(9)} ${String(entry.runes).padEnd(6)} ${String(entry.itemBuilds).padEnd(6)} ${note}`,
+    );
+  }
+
+  console.log(`\n[opgg] Totals: ${report.succeeded} succeeded / ${report.partial} partial / ${report.failed} failed out of ${report.total}`);
+  console.log(`[opgg] Output written to: ${options.outputDir}`);
+
+  // Tell the user where the report file is
+  const reportName = options.mode === 'ranked' ? 'crawl-report.json' : `crawl-report-${options.mode}.json`;
+  const reportPath = `${options.outputDir}/${reportName}`;
+  console.log(`[opgg] Crawl report:      ${reportPath}`);
 }
 
 main().catch((err) => {

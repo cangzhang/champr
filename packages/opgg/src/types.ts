@@ -210,3 +210,60 @@ export interface CrawlerOptions {
   position?: string;       // default: "" (all positions from page)
   championTiers?: Map<string, number>; // pre-fetched tier map from OP.GG champion list
 }
+
+// ============================================================
+// Crawl verification / report types
+// ============================================================
+
+/** Verification status for a single champion crawl */
+export type CrawlStatusValue = 'success' | 'partial' | 'failed';
+
+/**
+ * Per-champion crawl result entry included in the final report.
+ *
+ * - status 'success'  : runes AND item builds were both found
+ * - status 'partial'  : only one of runes / item builds was found
+ * - status 'failed'   : champion was never successfully crawled (all retries exhausted)
+ */
+export interface ChampionCrawlStatus {
+  /** Champion alias, e.g. "leesin" */
+  champion: string;
+  /** Game mode this entry belongs to */
+  mode: GameMode;
+  /** Crawl outcome */
+  status: CrawlStatusValue;
+  /** Human-readable explanation for 'partial' or 'failed' entries */
+  reason?: string;
+  /** Relative path to the written JSON file (only set for 'success' / 'partial') */
+  outputFile?: string;
+  /** Number of rune pages in the output (0 for 'failed') */
+  runes: number;
+  /** Number of item build sets in the output (0 for 'failed') */
+  itemBuilds: number;
+  /** Champion tier string if available, e.g. "1", "2" */
+  championTier?: string | null;
+  /** ISO-8601 timestamp of when this entry was recorded */
+  timestamp: string;
+}
+
+/** Final crawl report written to crawl-report[-{mode}].json */
+export interface CrawlReport {
+  /** ISO-8601 timestamp of when the report was generated */
+  generatedAt: string;
+  /** Game mode that was crawled */
+  mode: GameMode;
+  /** Region used during crawl */
+  region: string;
+  /** Tier filter used during crawl */
+  tier: string;
+  /** Total number of champions attempted */
+  total: number;
+  /** Champions with status 'success' */
+  succeeded: number;
+  /** Champions with status 'partial' */
+  partial: number;
+  /** Champions with status 'failed' */
+  failed: number;
+  /** Per-champion details, sorted alphabetically by champion alias */
+  champions: ChampionCrawlStatus[];
+}

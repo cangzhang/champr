@@ -1,5 +1,12 @@
 import { PlaywrightCrawler, type PlaywrightCrawlingContext } from 'crawlee';
-import type { CrawlerOptions, GameMode, LcuBuildSection } from './types.js';
+import type {
+  ChampionCrawlStatus,
+  CrawlReport,
+  CrawlerOptions,
+  CrawlStatusValue,
+  GameMode,
+  LcuBuildSection,
+} from './types.js';
 import { parseBuildPage, extractModeChampionList, extractRankedChampionList, type OpggChampionInfo } from './parser.js';
 import { transformPageData } from './transform.js';
 import fs from 'node:fs';
@@ -151,6 +158,7 @@ function makeRequestHandler(
   results: LcuBuildSection[],
   outputDir: string,
   championTiers: Map<string, number> | undefined,
+  statusMap: Map<string, ChampionCrawlStatus>,
 ) {
   return async (ctx: PlaywrightCrawlingContext) => {
     const { page, request, log } = ctx;
@@ -182,6 +190,20 @@ function makeRequestHandler(
       itemBuilds: buildSection.itemBuilds.length,
       championTier: buildSection.championTier,
     });
+
+    // Verify data quality and record status
+    const { status, reason } = verifyCrawlResult(buildSection);
+    statusMap.set(champion, {
+      champion,
+      mode: m,
+      status,
+      reason,
+      outputFile: outputPath,
+      runes: buildSection.runes.length,
+      itemBuilds: buildSection.itemBuilds.length,
+      championTier: buildSection.championTier,
+      timestamp: new Date().toISOString(),
+    });
   };
 }
 
@@ -192,11 +214,13 @@ function makeRequestHandler(
  * a single retry pass (30s cooldown, concurrency 1, longer timeouts) to recover
  * from transient bot-detection or rate-limiting issues.
  *
- * Returns an array of BuildSection results for each champion crawled.
+ * Returns an object with:
+ *   - results: LcuBuildSection[] — build data for each successfully crawled champion
+ *   - report:  CrawlReport       — per-champion status written to crawl-report[-{mode}].json
  */
 export async function crawlChampions(
   options: CrawlerOptions,
-): Promise<LcuBuildSection[]> {
+): Promise<{ results: LcuBuildSection[]; report: CrawlReport }> {
   const {
     region = DEFAULT_REGION,
     tier = DEFAULT_TIER,
@@ -222,6 +246,14 @@ export async function crawlChampions(
   const results: LcuBuildSection[] = [];
   const failedChampions: string[] = [];
 
+  /**
+   * Tracks the crawl status for every champion.
+   * Entries are created in makeRequestHandler (success/partial) or in
+   * failedRequestHandler (failed). The retry pass overwrites any 'failed'
+   * entry if the champion recovers.
+   */
+  const statusMap = new Map<string, ChampionCrawlStatus>();
+
   // Build request list
   const requests = champions.map((champion) => ({
     url: buildUrl(champion, region, tier, mode),
@@ -238,12 +270,22 @@ export async function crawlChampions(
     launchContext: { launchOptions: LAUNCH_OPTIONS },
     browserPoolOptions: { useFingerprints: false },
     preNavigationHooks: ANTI_BOT_HOOKS,
-    requestHandler: makeRequestHandler(results, outputDir, championTiers),
+    requestHandler: makeRequestHandler(results, outputDir, championTiers, statusMap),
 
     failedRequestHandler({ request, log }) {
       const champion = (request.userData?.champion as string) || request.url;
       log.error(`Giving up on ${champion} after retries`);
       failedChampions.push(champion);
+      // Record as failed; may be overwritten if the retry pass succeeds
+      statusMap.set(champion, {
+        champion,
+        mode,
+        status: 'failed',
+        reason: 'All retries exhausted during main crawl pass',
+        runes: 0,
+        itemBuilds: 0,
+        timestamp: new Date().toISOString(),
+      });
     },
   });
 
@@ -275,12 +317,23 @@ export async function crawlChampions(
       launchContext: { launchOptions: LAUNCH_OPTIONS },
       browserPoolOptions: { useFingerprints: false },
       preNavigationHooks: ANTI_BOT_HOOKS,
-      requestHandler: makeRequestHandler(results, outputDir, championTiers),
+      // makeRequestHandler will overwrite the 'failed' statusMap entry on recovery
+      requestHandler: makeRequestHandler(results, outputDir, championTiers, statusMap),
 
       failedRequestHandler({ request, log }) {
         const champion = (request.userData?.champion as string) || request.url;
         log.error(`Retry failed for ${champion}`);
         finalFailed.push(champion);
+        // Update reason to reflect retry also failed
+        statusMap.set(champion, {
+          champion,
+          mode,
+          status: 'failed',
+          reason: 'All retries exhausted (main pass + retry pass)',
+          runes: 0,
+          itemBuilds: 0,
+          timestamp: new Date().toISOString(),
+        });
       },
     });
 
@@ -302,6 +355,33 @@ export async function crawlChampions(
     log(`Combined output written to ${combinedPath}`);
   }
 
+  // ── Build and write crawl report ─────────────────────────────
+
+  const allStatuses = Array.from(statusMap.values()).sort((a, b) =>
+    a.champion.localeCompare(b.champion),
+  );
+
+  const succeededCount = allStatuses.filter((s) => s.status === 'success').length;
+  const partialCount = allStatuses.filter((s) => s.status === 'partial').length;
+  const failedCount = allStatuses.filter((s) => s.status === 'failed').length;
+
+  const report: CrawlReport = {
+    generatedAt: new Date().toISOString(),
+    mode,
+    region,
+    tier,
+    total: champions.length,
+    succeeded: succeededCount,
+    partial: partialCount,
+    failed: failedCount,
+    champions: allStatuses,
+  };
+
+  const reportName = mode === 'ranked' ? 'crawl-report.json' : `crawl-report-${mode}.json`;
+  const reportPath = path.join(outputDir, reportName);
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  log(`Crawl report written to ${reportPath}`);
+
   // ── Crawl Summary ────────────────────────────────────────────
 
   const totalFailed = finalFailed.length;
@@ -316,15 +396,48 @@ export async function crawlChampions(
   log(`  Mode:      ${mode}`);
   log(`  Total:     ${champions.length}`);
   log(`  Succeeded: ${succeededStr}`);
+  if (partialCount > 0) {
+    const partialNames = allStatuses
+      .filter((s) => s.status === 'partial')
+      .map((s) => `${s.champion} (${s.reason})`)
+      .join(', ');
+    log(`  Partial:   ${partialCount} — [${partialNames}]`);
+  }
   log(`  Failed:    ${totalFailed}`);
   if (totalFailed > 0) {
     log(`  Failed:    [${finalFailed.join(', ')}]`);
   }
   log('='.repeat(50));
 
-  return results;
+  return { results, report };
 }
 
 function log(msg: string) {
   console.log(`[opgg] ${msg}`);
+}
+
+/**
+ * Verify the quality of a crawled champion's build data.
+ *
+ * - 'success'  : has at least 1 rune page AND at least 1 item build
+ * - 'partial'  : has one of runes / item builds but not both
+ * - 'failed'   : has neither (data was written but entirely empty)
+ */
+function verifyCrawlResult(section: LcuBuildSection): {
+  status: CrawlStatusValue;
+  reason?: string;
+} {
+  const hasRunes = section.runes.length > 0;
+  const hasItems = section.itemBuilds.length > 0;
+
+  if (hasRunes && hasItems) {
+    return { status: 'success' };
+  }
+
+  if (!hasRunes && !hasItems) {
+    return { status: 'failed', reason: 'No runes and no item builds found' };
+  }
+
+  const missing = !hasRunes ? 'runes' : 'item builds';
+  return { status: 'partial', reason: `Missing ${missing}` };
 }
