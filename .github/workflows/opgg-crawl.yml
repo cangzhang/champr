@@ -98,6 +98,80 @@ jobs:
           echo "[ci] Running: pnpm start $ARGS"
           pnpm start $ARGS
 
+      - name: Write job summary
+        if: always()
+        working-directory: packages/opgg
+        run: |
+          MODE="${{ matrix.mode }}"
+          REPORT_FILE="./output/${MODE}/crawl-report.json"
+          # aram/urf/aram-mayhem use a suffixed filename
+          if [ "$MODE" != "ranked" ]; then
+            REPORT_FILE="./output/${MODE}/crawl-report-${MODE}.json"
+          fi
+
+          if [ ! -f "$REPORT_FILE" ]; then
+            echo "## OP.GG Crawl — ${MODE}" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> Report file not found — crawler may have failed before writing output." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          TOTAL=$(jq '.total' "$REPORT_FILE")
+          SUCCEEDED=$(jq '.succeeded' "$REPORT_FILE")
+          PARTIAL=$(jq '.partial' "$REPORT_FILE")
+          FAILED=$(jq '.failed' "$REPORT_FILE")
+          GENERATED=$(jq -r '.generatedAt' "$REPORT_FILE")
+
+          {
+            echo "## OP.GG Crawl — ${MODE}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Mode** | \`${MODE}\` |"
+            echo "| **Region** | \`${{ inputs.region }}\` |"
+            echo "| **Tier** | \`${{ inputs.tier }}\` |"
+            echo "| **Generated** | ${GENERATED} |"
+            echo ""
+            echo "### Results"
+            echo ""
+            echo "| Status | Count |"
+            echo "|---|---|"
+            echo "| ✅ Succeeded | ${SUCCEEDED} / ${TOTAL} |"
+            echo "| ⚠️ Partial | ${PARTIAL} |"
+            echo "| ❌ Failed | ${FAILED} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Partial champions
+          PARTIAL_LIST=$(jq -r '.champions[] | select(.status == "partial") | "| \(.champion) | \(.reason // "") | \(.runes) | \(.itemBuilds) |"' "$REPORT_FILE")
+          if [ -n "$PARTIAL_LIST" ]; then
+            {
+              echo ""
+              echo "### ⚠️ Partial Champions"
+              echo ""
+              echo "| Champion | Reason | Runes | Item Builds |"
+              echo "|---|---|---|---|"
+              echo "$PARTIAL_LIST"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Failed champions
+          FAILED_LIST=$(jq -r '.champions[] | select(.status == "failed") | "| \(.champion) | \(.reason // "") |"' "$REPORT_FILE")
+          if [ -n "$FAILED_LIST" ]; then
+            {
+              echo ""
+              echo "### ❌ Failed Champions"
+              echo ""
+              echo "| Champion | Reason |"
+              echo "|---|---|"
+              echo "$FAILED_LIST"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$FAILED" = "0" ] && [ "$PARTIAL" = "0" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_All champions crawled successfully._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v7
