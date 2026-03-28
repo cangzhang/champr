@@ -60,12 +60,12 @@ jobs:
         mode: ${{ fromJson(needs.prepare.outputs.modes) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Enable corepack (pnpm)
         run: corepack enable
@@ -100,7 +100,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: opgg-${{ matrix.mode }}
           path: packages/opgg/output/${{ matrix.mode }}/
