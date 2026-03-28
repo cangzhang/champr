@@ -15,7 +15,7 @@ const DEFAULT_CONCURRENCY = 3;
 const RETRY_DELAY_MS = 30_000;
 
 const USER_AGENT =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
 
 /** Modes that use the /lol/modes/{mode}/ URL pattern instead of /lol/champions/ */
 const ALT_MODES: ReadonlySet<GameMode> = new Set(['aram', 'urf', 'aram-mayhem']);
@@ -25,9 +25,17 @@ const ANTI_BOT_HOOKS = [
   async ({ page }: { page: import('playwright').Page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      // @ts-ignore
+      window.chrome = { runtime: {} };
     });
     await page.context().setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
+      'User-Agent': USER_AGENT,
+      'sec-ch-ua': '"Chromium";v="134", "Google Chrome";v="134", "Not:A-Brand";v="24"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
     });
   },
 ];
@@ -35,7 +43,14 @@ const ANTI_BOT_HOOKS = [
 /** Shared launch options */
 const LAUNCH_OPTIONS = {
   headless: true,
-  args: ['--disable-blink-features=AutomationControlled'],
+  args: [
+    '--disable-blink-features=AutomationControlled',
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    `--user-agent=${USER_AGENT}`,
+  ],
 };
 
 /**
@@ -85,9 +100,9 @@ export async function fetchChampionList(
 
   const crawler = new PlaywrightCrawler({
     maxConcurrency: 1,
-    requestHandlerTimeoutSecs: 60,
-    navigationTimeoutSecs: 30,
-    maxRequestRetries: 2,
+    requestHandlerTimeoutSecs: 90,
+    navigationTimeoutSecs: 60,
+    maxRequestRetries: 3,
     launchContext: { launchOptions: LAUNCH_OPTIONS },
     browserPoolOptions: { useFingerprints: false },
     preNavigationHooks: ANTI_BOT_HOOKS,
@@ -95,8 +110,8 @@ export async function fetchChampionList(
     async requestHandler(ctx: PlaywrightCrawlingContext) {
       const { page, log } = ctx;
 
-      await page.waitForSelector('img', { timeout: 15000 }).catch(() => {});
-      await page.waitForTimeout(2000);
+      await page.waitForSelector('img', { timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(3000);
 
       if (ALT_MODES.has(mode)) {
         log.info(`Extracting champion list from mode page (${mode})...`);
