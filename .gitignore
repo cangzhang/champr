@@ -13,3 +13,5 @@ node_modules
 **/*/dist/
 **/*/output/
 **/*/storage/
+
+data/

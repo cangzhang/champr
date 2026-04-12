@@ -221,8 +221,8 @@ export type CrawlStatusValue = 'success' | 'partial' | 'failed';
 /**
  * Per-champion crawl result entry included in the final report.
  *
- * - status 'success'  : runes AND item builds were both found
- * - status 'partial'  : only one of runes / item builds was found
+ * - status 'success'  : all expected data for the mode was found
+ * - status 'partial'  : only some expected data was found
  * - status 'failed'   : champion was never successfully crawled (all retries exhausted)
  */
 export interface ChampionCrawlStatus {

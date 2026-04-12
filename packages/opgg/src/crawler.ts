@@ -192,7 +192,7 @@ function makeRequestHandler(
     });
 
     // Verify data quality and record status
-    const { status, reason } = verifyCrawlResult(buildSection);
+    const { status, reason } = verifyCrawlResult(buildSection, m);
     statusMap.set(champion, {
       champion,
       mode: m,
@@ -419,16 +419,24 @@ function log(msg: string) {
 /**
  * Verify the quality of a crawled champion's build data.
  *
- * - 'success'  : has at least 1 rune page AND at least 1 item build
- * - 'partial'  : has one of runes / item builds but not both
+ * - 'success'  : has the required data for the mode
+ * - 'partial'  : only some expected data was found
  * - 'failed'   : has neither (data was written but entirely empty)
  */
-function verifyCrawlResult(section: LcuBuildSection): {
+function verifyCrawlResult(section: LcuBuildSection, mode: GameMode): {
   status: CrawlStatusValue;
   reason?: string;
 } {
   const hasRunes = section.runes.length > 0;
   const hasItems = section.itemBuilds.length > 0;
+
+  if (mode === 'aram-mayhem') {
+    if (hasItems) {
+      return { status: 'success' };
+    }
+
+    return { status: 'failed', reason: 'No item builds found' };
+  }
 
   if (hasRunes && hasItems) {
     return { status: 'success' };
