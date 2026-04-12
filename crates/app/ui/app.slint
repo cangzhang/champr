@@ -1,14 +1,4 @@
-import { VerticalBox, HorizontalBox, ListView, CheckBox, Button, ComboBox } from "std-widgets.slint";
-
-// ---------------------------------------------------------------------------
-//  Data models
-// ---------------------------------------------------------------------------
-
-export struct SourceItemModel {
-    label: string,
-    value: string,
-    selected: bool,
-}
+import { VerticalBox, HorizontalBox, ListView, Button } from "std-widgets.slint";
 
 export struct RuneModel {
     /// Display index (for identification in callbacks)
@@ -32,14 +22,12 @@ export component SourcesWindow inherits Window {
 
     // --- properties ---
     in-out property <string> status: "loading";          // "loading" | "success" | "error"
-    in-out property <[SourceItemModel]> sources;
-    in-out property <string> lcu-status: "disconnected"; // "disconnected" | "connected"
+    in-out property <string> lcu-status: "disconnected"; // "disconnected" | "authorizing" | "needs-admin" | "connected"
     in-out property <string> lcu-summoner: "";
     in-out property <bool> applying-builds: false;
     in-out property <string> apply-status: "";           // "", "Applying…", "Done! (N champions)", "Error: …"
 
     // --- callbacks ---
-    callback source-toggled(int, bool);
     callback apply-builds-clicked();
 
     VerticalBox {
@@ -74,44 +62,44 @@ export component SourcesWindow inherits Window {
             Text {
                 text: root.lcu-status == "connected"
                     ? "League Client: " + root.lcu-summoner
+                    : root.lcu-status == "authorizing"
+                    ? "League Client detected. Requesting admin access..."
+                    : root.lcu-status == "needs-admin"
+                    ? "League Client detected. Admin access is required once to read LCU credentials."
                     : "League Client not detected";
                 font-size: 13px;
-                color: root.lcu-status == "connected" ? #22cc44 : #cc3333;
+                color: root.lcu-status == "connected"
+                    ? #22cc44
+                    : root.lcu-status == "authorizing"
+                    ? #cc9a22
+                    : root.lcu-status == "needs-admin"
+                    ? #cc9a22
+                    : #cc3333;
                 vertical-alignment: center;
             }
         }
 
-        // Source list
+        Text {
+            text: "Source: OP.GG";
+            font-size: 14px;
+            horizontal-alignment: center;
+            color: #666666;
+        }
+
         if root.status == "loading" : HorizontalBox {
             alignment: center;
             Text {
-                text: "Loading sources…";
+                text: "Loading champion data…";
                 font-size: 14px;
                 color: #888888;
             }
         }
 
         if root.status == "error" : Text {
-            text: "Failed to load source list. Check your network.";
+            text: "Failed to load champion data. Check your network.";
             font-size: 14px;
             horizontal-alignment: center;
             color: #cc3333;
-        }
-
-        if root.status == "success" : ListView {
-            for source[index] in root.sources : HorizontalBox {
-                padding-top: 4px;
-                padding-bottom: 4px;
-                spacing: 8px;
-
-                CheckBox {
-                    text: source.label;
-                    checked: source.selected;
-                    toggled => {
-                        root.source-toggled(index, self.checked);
-                    }
-                }
-            }
         }
 
         // Apply Builds button + status
@@ -151,15 +139,12 @@ export component RunesWindow inherits Window {
     in-out property <string> champion-name: "";
     in-out property <image> champion-avatar;
     in-out property <bool> has-champion: false;
-    in-out property <[string]> source-names;
-    in-out property <int> current-source-index: 0;
     in-out property <[RuneModel]> runes;
     in-out property <string> rune-status: "";  // "" | "loading" | "error" | "success"
     in-out property <string> apply-rune-status: "";
 
     // --- callbacks ---
     callback close-requested();
-    callback source-changed(int);
     callback apply-rune-clicked(int);
 
     VerticalBox {
@@ -187,7 +172,6 @@ export component RunesWindow inherits Window {
             }
         }
 
-        // Source picker
         if root.has-champion : HorizontalBox {
             spacing: 8px;
             alignment: center;
@@ -197,12 +181,10 @@ export component RunesWindow inherits Window {
                 font-size: 14px;
                 vertical-alignment: center;
             }
-            ComboBox {
-                model: root.source-names;
-                current-index <=> root.current-source-index;
-                selected(value) => {
-                    root.source-changed(root.current-source-index);
-                }
+            Text {
+                text: "OP.GG";
+                font-size: 14px;
+                color: #666666;
             }
         }
 

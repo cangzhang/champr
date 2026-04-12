@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[allow(dead_code)]
 pub struct Settings {
     /// Source identifiers the user has checked (e.g. ["op.gg", "u.gg"])
     #[serde(default)]

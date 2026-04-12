@@ -8,37 +8,20 @@ use std::{
 use anyhow::{anyhow, Context};
 use flate2::read::GzDecoder;
 use futures::future::join_all;
-use futures::future::try_join3;
+use futures::future::try_join;
 use kv_log_macro::{error, info, warn};
 use reqwest::header::USER_AGENT;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tar::Archive;
 
-use crate::{
-    builds::{self, BuildData, ItemBuild},
-    source::SourceItem,
-};
+use crate::builds::{self, BuildData, ItemBuild};
 
 pub const SERVICE_URL: &str = "http://150.230.215.177:3030";
 
 #[derive(Debug, Clone)]
 pub enum FetchError {
     Failed,
-}
-
-pub async fn fetch_sources() -> Result<Vec<SourceItem>, FetchError> {
-    let url = format!("{SERVICE_URL}/api/sources");
-    match reqwest::get(url).await {
-        Ok(resp) => resp.json::<Vec<SourceItem>>().await.map_err(|err| {
-            error!("source list serialize: {:?}", err);
-            FetchError::Failed
-        }),
-        Err(err) => {
-            error!("fetch source list: {:?}", err);
-            Err(FetchError::Failed)
-        }
-    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,14 +65,8 @@ pub async fn fetch_champion_list() -> Result<ChampionsMap, FetchError> {
     Err(FetchError::Failed)
 }
 
-pub async fn init_for_ui(
-) -> Result<(Vec<SourceItem>, ChampionsMap, Vec<DataDragonRune>), FetchError> {
-    try_join3(
-        fetch_sources(),
-        fetch_champion_list(),
-        fetch_data_dragon_runes(),
-    )
-    .await
+pub async fn init_for_ui() -> Result<(ChampionsMap, Vec<DataDragonRune>), FetchError> {
+    try_join(fetch_champion_list(), fetch_data_dragon_runes()).await
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]

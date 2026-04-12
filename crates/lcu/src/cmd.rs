@@ -12,6 +12,8 @@ const REGION_KEY: &str = "--region=";
 const DIR_KEY: &str = "--install-directory=";
 #[allow(dead_code)]
 const LCU_COMMAND: &str = "Get-CimInstance Win32_Process -Filter \"name = 'LeagueClientUx.exe'\" | Select-Object -ExpandProperty CommandLine";
+#[cfg(target_os = "windows")]
+const LCU_PROCESS_ID_COMMAND: &str = "Get-Process LeagueClientUx -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Id";
 
 lazy_static! {
     static ref PORT_REGEXP: regex::Regex = regex::Regex::new(r"--app-port=\d+").unwrap();
@@ -39,16 +41,7 @@ pub struct CommandLineOutput {
 
 #[cfg(target_os = "windows")]
 pub fn get_cmd_output() -> Result<CommandLineOutput, ()> {
-    use powershell_script::PsScriptBuilder;
-
-    let ps = PsScriptBuilder::new()
-        .no_profile(true)
-        .non_interactive(true)
-        .hidden(true)
-        .print_commands(false)
-        .build();
-
-    match ps.run(LCU_COMMAND) {
+    match run_powershell(LCU_COMMAND, true) {
         Ok(out) => {
             #[cfg(not(debug_assertions))]
             info!("output: {:?}", out.stdout());
@@ -61,6 +54,142 @@ pub fn get_cmd_output() -> Result<CommandLineOutput, ()> {
     }
 
     Err(())
+}
+
+#[cfg(target_os = "windows")]
+fn run_powershell(
+    command: &str,
+    require_admin: bool,
+) -> Result<powershell_script::Output, powershell_script::PsError> {
+    if require_admin {
+        run_powershell_elevated(command)
+    } else {
+        run_powershell_direct(command)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn run_powershell_direct(command: &str) -> Result<powershell_script::Output, powershell_script::PsError> {
+    use powershell_script::PsScriptBuilder;
+
+    let ps = PsScriptBuilder::new()
+        .no_profile(true)
+        .non_interactive(true)
+        .hidden(true)
+        .print_commands(false)
+        .build();
+
+    ps.run(command)
+}
+
+#[cfg(target_os = "windows")]
+fn run_powershell_elevated(command: &str) -> Result<powershell_script::Output, powershell_script::PsError> {
+    use nanoid::nanoid;
+    use powershell_script::{Output, PsError};
+    use std::fs;
+    use std::os::windows::process::ExitStatusExt;
+    use std::path::Path;
+    use std::process::Output as ProcessOutput;
+
+    fn ps_literal(path: &Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+    }
+
+    fn cleanup_temp_file(path: &Path) {
+        let _ = fs::remove_file(path);
+    }
+
+    let temp_dir = std::env::temp_dir();
+    let token = nanoid!();
+    let script_path = temp_dir.join(format!("champr-lcu-{token}.ps1"));
+    let stdout_path = temp_dir.join(format!("champr-lcu-{token}.stdout"));
+    let stderr_path = temp_dir.join(format!("champr-lcu-{token}.stderr"));
+
+    let inner_script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+try {{
+    $result = & {{ {command} }} | Out-String
+    [System.IO.File]::WriteAllText({stdout_path}, $result, [System.Text.Encoding]::UTF8)
+    exit 0
+}} catch {{
+    [System.IO.File]::WriteAllText({stderr_path}, ($_ | Out-String), [System.Text.Encoding]::UTF8)
+    exit 1
+}}
+"#,
+        stdout_path = ps_literal(&stdout_path),
+        stderr_path = ps_literal(&stderr_path),
+    );
+
+    fs::write(&script_path, inner_script).map_err(PsError::Io)?;
+
+    let launch_script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$proc = Start-Process -FilePath 'PowerShell.exe' -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',{script_path})
+if ($null -eq $proc) {{
+    exit 1
+}}
+exit $proc.ExitCode
+"#,
+        script_path = ps_literal(&script_path),
+    );
+
+    let launched = run_powershell_direct(&launch_script);
+    let (exit_code, outer_stderr) = match launched {
+        Ok(output) => {
+            let inner = output.into_inner();
+            (inner.status.code().unwrap_or(0), inner.stderr)
+        }
+        Err(PsError::Powershell(output)) => {
+            let inner = output.into_inner();
+            (inner.status.code().unwrap_or(1), inner.stderr)
+        }
+        Err(err) => {
+            cleanup_temp_file(&script_path);
+            cleanup_temp_file(&stdout_path);
+            cleanup_temp_file(&stderr_path);
+            return Err(err);
+        }
+    };
+
+    let stdout = fs::read(&stdout_path).unwrap_or_default();
+    let mut stderr = fs::read(&stderr_path).unwrap_or_default();
+    if stderr.is_empty() {
+        stderr = outer_stderr;
+    }
+
+    cleanup_temp_file(&script_path);
+    cleanup_temp_file(&stdout_path);
+    cleanup_temp_file(&stderr_path);
+
+    let output = Output::from(ProcessOutput {
+        status: std::process::ExitStatus::from_raw(exit_code as u32),
+        stdout,
+        stderr,
+    });
+
+    if output.success() {
+        Ok(output)
+    } else {
+        Err(PsError::Powershell(output))
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn get_lcu_process_id() -> Option<u32> {
+    match run_powershell(LCU_PROCESS_ID_COMMAND, false) {
+        Ok(out) => out
+            .stdout()
+            .and_then(|stdout| stdout.trim().parse::<u32>().ok()),
+        Err(err) => {
+            error!("process lookup error: {:?}", err);
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn get_lcu_process_id() -> Option<u32> {
+    None
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -264,11 +393,19 @@ pub async fn test_connectivity() -> anyhow::Result<bool> {
 }
 
 pub fn check_if_lol_running() -> bool {
-    if let Ok(auth) = get_cmd_output() {
-        return !auth.auth_url.is_empty();
+    #[cfg(target_os = "windows")]
+    {
+        return get_lcu_process_id().is_some();
     }
 
-    false
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(auth) = get_cmd_output() {
+            return !auth.auth_url.is_empty();
+        }
+
+        false
+    }
 }
 
 pub fn start_check_cmd_task() {}

@@ -3,29 +3,29 @@
     windows_subsystem = "windows"
 )]
 
-mod settings;
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use kv_log_macro::{info, warn};
 use slint::{
-    ComponentHandle, Image, Model, ModelRc, SharedPixelBuffer, SharedString, VecModel, Weak,
+    ComponentHandle, Image, ModelRc, SharedPixelBuffer, SharedString, VecModel, Weak,
 };
 
 use lcu::{
     builds::Rune,
-    cmd::get_cmd_output,
+    cmd::{get_cmd_output, get_lcu_process_id},
     lcu_api::{self, make_sub_msg},
     reqwest_websocket::Message,
     serde_json::{from_str, Value},
     web::{self, ChampionsMap},
 };
 
-use settings::Settings;
-
 slint::include_modules!();
+
+#[allow(dead_code)]
+const DEFAULT_SOURCE_LABEL: &str = "OP.GG";
+const DEFAULT_SOURCE_VALUE: &str = "op.gg";
 
 // ---------------------------------------------------------------------------
 //  Shared state accessible from both the UI thread and tokio tasks
@@ -38,12 +38,8 @@ struct AppState {
     is_tencent: bool,
     lol_dir: String,
     champions_map: ChampionsMap,
-    /// Runes for the currently displayed champion + source, kept so we can index into them.
+    /// Runes for the currently displayed champion, kept so we can index into them.
     current_runes: Vec<Rune>,
-    /// All selected source values (kept in sync with the UI model).
-    selected_sources: Vec<String>,
-    /// The source value currently chosen in the runes window combo box.
-    rune_source: String,
 }
 
 impl Default for AppState {
@@ -54,8 +50,6 @@ impl Default for AppState {
             lol_dir: String::new(),
             champions_map: ChampionsMap::new(),
             current_runes: Vec::new(),
-            selected_sources: Vec::new(),
-            rune_source: String::new(),
         }
     }
 }
@@ -69,49 +63,11 @@ type SharedState = Arc<Mutex<AppState>>;
 fn main() {
     femme::with_level(femme::LevelFilter::Info);
 
-    let saved = Settings::load();
-
     // -- Create windows --
     let sources_window = SourcesWindow::new().unwrap();
     let runes_window = RunesWindow::new().unwrap();
 
     let state: SharedState = Arc::new(Mutex::new(AppState::default()));
-
-    // Pre-populate selected sources from settings
-    {
-        let mut s = state.lock().unwrap();
-        s.selected_sources = saved.selected_sources.clone();
-        s.rune_source = saved.rune_source.clone();
-    }
-
-    // -- Source toggle callback --
-    let state_c = state.clone();
-    let sources_weak = sources_window.as_weak();
-    sources_window.on_source_toggled(move |index, checked| {
-        if let Some(win) = sources_weak.upgrade() {
-            let sources = win.get_sources();
-            if let Some(mut item) = sources.row_data(index as usize) {
-                item.selected = checked;
-                sources.set_row_data(index as usize, item.clone());
-
-                // Update shared state + persist
-                let mut s = state_c.lock().unwrap();
-                if checked {
-                    if !s.selected_sources.contains(&item.value.to_string()) {
-                        s.selected_sources.push(item.value.to_string());
-                    }
-                } else {
-                    s.selected_sources.retain(|v| v != item.value.as_str());
-                }
-                let settings = Settings {
-                    selected_sources: s.selected_sources.clone(),
-                    rune_source: s.rune_source.clone(),
-                };
-                drop(s);
-                settings.save();
-            }
-        }
-    });
 
     // -- Apply Builds button --
     let state_c = state.clone();
@@ -126,25 +82,22 @@ fn main() {
         let handle = rt_handle_ref.clone();
         move || {
             let s = state_c.lock().unwrap();
-            let selected: Vec<String> = s.selected_sources.clone();
             let champions = s.champions_map.clone();
             let dir = s.lol_dir.clone();
             let is_tencent = s.is_tencent;
             drop(s);
 
-            if selected.is_empty() || dir.is_empty() {
+            if dir.is_empty() {
                 let w = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
-                        win.set_apply_status(SharedString::from(if selected.is_empty() {
-                            "Select at least one source"
-                        } else {
-                            "League Client directory not found"
-                        }));
+                        win.set_apply_status(SharedString::from("League Client directory not found"));
                     }
                 });
                 return;
             }
+
+            let selected = vec![DEFAULT_SOURCE_VALUE.to_string()];
 
             // Set applying state
             let w = weak.clone();
@@ -183,55 +136,6 @@ fn main() {
     runes_window.on_close_requested(move || {
         if let Some(win) = runes_weak.upgrade() {
             win.hide().unwrap();
-        }
-    });
-
-    // -- Runes window: source changed --
-    let runes_weak = runes_window.as_weak();
-    let state_c = state.clone();
-    let handle_c = rt_handle_ref.clone();
-    runes_window.on_source_changed({
-        move |source_idx| {
-            let s = state_c.lock().unwrap();
-            let sources: Vec<String> = s.selected_sources.clone();
-            drop(s);
-
-            if (source_idx as usize) >= sources.len() {
-                return;
-            }
-            let source = sources[source_idx as usize].clone();
-
-            // Save preference
-            {
-                let mut s = state_c.lock().unwrap();
-                s.rune_source = source.clone();
-                let settings = Settings {
-                    selected_sources: s.selected_sources.clone(),
-                    rune_source: s.rune_source.clone(),
-                };
-                drop(s);
-                settings.save();
-            }
-
-            // Re-fetch runes for the current champion
-            let weak = runes_weak.clone();
-            let state2 = state_c.clone();
-            handle_c.spawn(async move {
-                let champ_id = {
-                    let w_ref = weak.clone();
-                    // Read champion_id from UI — need invoke_from_event_loop
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(win) = w_ref.upgrade() {
-                            let _ = tx.send(win.get_champion_id() as i64);
-                        }
-                    });
-                    rx.await.unwrap_or(0)
-                };
-                if champ_id > 0 {
-                    fetch_and_show_runes(weak, state2, source, champ_id).await;
-                }
-            });
         }
     });
 
@@ -280,7 +184,7 @@ fn main() {
     // -- Spawn background tasks --
     let sources_weak2 = sources_window.as_weak();
     let state_c2 = state.clone();
-    rt_handle.spawn(fetch_sources_task(sources_weak2, state_c2, saved));
+    rt_handle.spawn(fetch_sources_task(sources_weak2, state_c2));
 
     let runes_weak2 = runes_window.as_weak();
     let sources_weak3 = sources_window.as_weak();
@@ -299,32 +203,17 @@ fn main() {
 async fn fetch_sources_task(
     sources_weak: Weak<SourcesWindow>,
     state: SharedState,
-    saved: Settings,
 ) {
     match web::init_for_ui().await {
-        Ok((sources, champions_map, _runes_meta)) => {
+        Ok((champions_map, _runes_meta)) => {
             // Store champions map in shared state
             {
                 let mut s = state.lock().unwrap();
                 s.champions_map = champions_map;
             }
 
-            let selected_set: std::collections::HashSet<&str> =
-                saved.selected_sources.iter().map(|s| s.as_str()).collect();
-
-            let items: Vec<SourceItemModel> = sources
-                .iter()
-                .map(|s| SourceItemModel {
-                    label: SharedString::from(&s.label),
-                    value: SharedString::from(&s.value),
-                    selected: selected_set.contains(s.value.as_str()),
-                })
-                .collect();
-
             slint::invoke_from_event_loop(move || {
                 if let Some(win) = sources_weak.upgrade() {
-                    let model = ModelRc::new(VecModel::from(items));
-                    win.set_sources(model);
                     win.set_status(SharedString::from("success"));
                 }
             })
@@ -352,78 +241,118 @@ async fn lcu_monitor_task(
 ) {
     let mut current_auth_url = String::new();
     let mut current_champion_id: i64 = 0;
+    let mut current_lcu_pid: Option<u32> = None;
+    let mut auth_prompted_for_pid: Option<u32> = None;
 
     loop {
-        // Poll for the League Client process
-        let cmd_output = match get_cmd_output() {
-            Ok(ret) if !ret.auth_url.is_empty() => ret,
-            _ => {
-                // No League Client found
-                if !current_auth_url.is_empty() {
-                    current_auth_url.clear();
-                    current_champion_id = 0;
+        let Some(lcu_pid) = get_lcu_process_id() else {
+            if current_lcu_pid.is_some() || !current_auth_url.is_empty() {
+                current_auth_url.clear();
+                current_champion_id = 0;
+                current_lcu_pid = None;
+                auth_prompted_for_pid = None;
 
-                    {
-                        let mut s = state.lock().unwrap();
-                        s.auth_url.clear();
-                        s.lol_dir.clear();
-                        s.is_tencent = false;
-                    }
-
-                    let sw = sources_weak.clone();
-                    let rw = runes_weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(win) = sw.upgrade() {
-                            win.set_lcu_status(SharedString::from("disconnected"));
-                            win.set_lcu_summoner(SharedString::from(""));
-                        }
-                        if let Some(win) = rw.upgrade() {
-                            win.set_has_champion(false);
-                            win.set_champion_id(0);
-                            win.hide().unwrap();
-                        }
-                    });
+                {
+                    let mut s = state.lock().unwrap();
+                    s.auth_url.clear();
+                    s.lol_dir.clear();
+                    s.is_tencent = false;
                 }
-                tokio::time::sleep(Duration::from_millis(2500)).await;
-                continue;
+
+                let sw = sources_weak.clone();
+                let rw = runes_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = sw.upgrade() {
+                        win.set_lcu_status(SharedString::from("disconnected"));
+                        win.set_lcu_summoner(SharedString::from(""));
+                    }
+                    if let Some(win) = rw.upgrade() {
+                        win.set_has_champion(false);
+                        win.set_champion_id(0);
+                        win.hide().unwrap();
+                    }
+                });
             }
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            continue;
         };
 
-        let auth_url = cmd_output.auth_url.clone();
-
-        // If auth URL changed, update state and fetch summoner
-        if auth_url != current_auth_url {
-            current_auth_url = auth_url.clone();
+        if current_lcu_pid != Some(lcu_pid) {
+            current_lcu_pid = Some(lcu_pid);
+            auth_prompted_for_pid = None;
+            current_auth_url.clear();
             current_champion_id = 0;
-            info!("LCU auth URL changed: {}", &current_auth_url);
 
             {
                 let mut s = state.lock().unwrap();
-                s.auth_url = auth_url.clone();
-                s.lol_dir = cmd_output.dir.clone();
-                s.is_tencent = cmd_output.is_tencent;
+                s.auth_url.clear();
+                s.lol_dir.clear();
+                s.is_tencent = false;
             }
+        }
 
-            // Try to get summoner name
-            let endpoint = format!("https://{auth_url}");
-            let summoner_name = match lcu_api::get_current_summoner(&endpoint).await {
-                Ok(summoner) => {
-                    if !summoner.game_name.is_empty() {
-                        format!("{}#{}", summoner.game_name, summoner.tag_line)
-                    } else {
-                        summoner.display_name
+        if current_auth_url.is_empty() {
+            if auth_prompted_for_pid != Some(lcu_pid) {
+                auth_prompted_for_pid = Some(lcu_pid);
+
+                let sw = sources_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = sw.upgrade() {
+                        win.set_lcu_status(SharedString::from("authorizing"));
+                        win.set_lcu_summoner(SharedString::from(""));
                     }
-                }
-                Err(_) => "Connected".to_string(),
-            };
+                });
 
-            let sw = sources_weak.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(win) = sw.upgrade() {
-                    win.set_lcu_status(SharedString::from("connected"));
-                    win.set_lcu_summoner(SharedString::from(&summoner_name));
+                let cmd_output = match tokio::task::spawn_blocking(get_cmd_output).await {
+                    Ok(Ok(ret)) if !ret.auth_url.is_empty() => ret,
+                    _ => {
+                        let sw = sources_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(win) = sw.upgrade() {
+                                win.set_lcu_status(SharedString::from("needs-admin"));
+                                win.set_lcu_summoner(SharedString::from(""));
+                            }
+                        });
+                        tokio::time::sleep(Duration::from_millis(2500)).await;
+                        continue;
+                    }
+                };
+
+                let auth_url = cmd_output.auth_url.clone();
+                current_auth_url = auth_url.clone();
+                current_champion_id = 0;
+                info!("LCU auth URL changed: {}", &current_auth_url);
+
+                {
+                    let mut s = state.lock().unwrap();
+                    s.auth_url = auth_url.clone();
+                    s.lol_dir = cmd_output.dir.clone();
+                    s.is_tencent = cmd_output.is_tencent;
                 }
-            });
+
+                let endpoint = format!("https://{auth_url}");
+                let summoner_name = match lcu_api::get_current_summoner(&endpoint).await {
+                    Ok(summoner) => {
+                        if !summoner.game_name.is_empty() {
+                            format!("{}#{}", summoner.game_name, summoner.tag_line)
+                        } else {
+                            summoner.display_name
+                        }
+                    }
+                    Err(_) => "Connected".to_string(),
+                };
+
+                let sw = sources_weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = sw.upgrade() {
+                        win.set_lcu_status(SharedString::from("connected"));
+                        win.set_lcu_summoner(SharedString::from(&summoner_name));
+                    }
+                });
+            } else {
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                continue;
+            }
         }
 
         // Connect via WebSocket and listen for champion select events
@@ -499,10 +428,9 @@ async fn lcu_monitor_task(
                 }
 
                 info!("WebSocket disconnected, will retry");
-                current_auth_url.clear();
             }
             Err(e) => {
-                warn!("error creating WebSocket client: {}", e);
+                warn!("error creating WebSocket client: {:?}", e);
             }
         }
 
@@ -583,24 +511,9 @@ async fn show_champion_runes(
             .unwrap_or_default()
     };
 
-    // Determine which sources are selected and which is the rune source
-    let (source_names, rune_source_idx, rune_source_value) = {
-        let s = state.lock().unwrap();
-        let sources = s.selected_sources.clone();
-        let rune_src = s.rune_source.clone();
-        let idx = sources.iter().position(|v| v == &rune_src).unwrap_or(0);
-        let value = sources.get(idx).cloned().unwrap_or_default();
-        (sources, idx, value)
-    };
-
-    // Update the runes window with champion info + source list
+    // Update the runes window with champion info
     let weak = runes_weak.clone();
-    let names_for_ui: Vec<SharedString> = source_names
-        .iter()
-        .map(|s| SharedString::from(s.as_str()))
-        .collect();
     let champ_name = SharedString::from(&champion_name);
-    let src_idx = rune_source_idx as i32;
 
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(win) = weak.upgrade() {
@@ -617,18 +530,17 @@ async fn show_champion_runes(
                 win.set_champion_avatar(Image::from_rgba8(buffer));
             }
 
-            let model = ModelRc::new(VecModel::from(names_for_ui));
-            win.set_source_names(model);
-            win.set_current_source_index(src_idx);
-
             win.show().unwrap();
         }
     });
 
-    // Fetch runes for the chosen source
-    if !rune_source_value.is_empty() {
-        fetch_and_show_runes(runes_weak, state, rune_source_value, champion_id).await;
-    }
+    fetch_and_show_runes(
+        runes_weak,
+        state,
+        DEFAULT_SOURCE_VALUE.to_string(),
+        champion_id,
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -703,14 +615,20 @@ async fn make_ws_client_tls(
 ) -> Result<lcu::reqwest_websocket::WebSocket, lcu::reqwest_websocket::Error> {
     use lcu::reqwest_websocket::RequestBuilderExt;
 
-    let url = format!("wss://{endpoint}");
+    let url = format!("wss://{endpoint}/");
     let client = lcu::reqwest::Client::builder()
+        .http1_only()
         .use_rustls_tls()
         .danger_accept_invalid_certs(true)
         .no_proxy()
         .build()
         .unwrap();
-    let response = client.get(url).upgrade().send().await?;
+    let response = client
+        .get(url)
+        .version(lcu::reqwest::Version::HTTP_11)
+        .upgrade()
+        .send()
+        .await?;
     let ws = response.into_websocket().await?;
     Ok(ws)
 }
