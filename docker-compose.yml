@@ -1,0 +1,18 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: crates/server/Dockerfile
+    ports:
+      - "3030:3030"
+    environment:
+      SERVER_ADDR: 0.0.0.0:3030
+      DATABASE_URL: sqlite://data/champr.db
+      JWT_SECRET: change-me-in-production
+      BOOTSTRAP_ADMIN_EMAIL: admin@example.com
+      BOOTSTRAP_ADMIN_PASSWORD: change-me-now
+    volumes:
+      - server-data:/app/data
+
+volumes:
+  server-data:

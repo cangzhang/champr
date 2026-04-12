@@ -136,13 +136,11 @@ fn main() {
                 let w = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
-                        win.set_apply_status(SharedString::from(
-                            if selected.is_empty() {
-                                "Select at least one source"
-                            } else {
-                                "League Client directory not found"
-                            }
-                        ));
+                        win.set_apply_status(SharedString::from(if selected.is_empty() {
+                            "Select at least one source"
+                        } else {
+                            "League Client directory not found"
+                        }));
                     }
                 });
                 return;
@@ -160,14 +158,9 @@ fn main() {
             let weak2 = weak.clone();
             handle.spawn(async move {
                 let logs = Arc::new(Mutex::new(Vec::new()));
-                let result = lcu::builds::batch_apply(
-                    selected,
-                    champions,
-                    dir,
-                    is_tencent,
-                    logs.clone(),
-                )
-                .await;
+                let result =
+                    lcu::builds::batch_apply(selected, champions, dir, is_tencent, logs.clone())
+                        .await;
 
                 let count = logs.lock().unwrap().len();
                 let msg = match result {
@@ -602,7 +595,10 @@ async fn show_champion_runes(
 
     // Update the runes window with champion info + source list
     let weak = runes_weak.clone();
-    let names_for_ui: Vec<SharedString> = source_names.iter().map(|s| SharedString::from(s.as_str())).collect();
+    let names_for_ui: Vec<SharedString> = source_names
+        .iter()
+        .map(|s| SharedString::from(s.as_str()))
+        .collect();
     let champ_name = SharedString::from(&champion_name);
     let src_idx = rune_source_idx as i32;
 

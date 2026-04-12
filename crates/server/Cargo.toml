@@ -1,0 +1,24 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+argon2 = "0.5"
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+jsonwebtoken = "9.3"
+rand_core = { version = "0.6", features = ["getrandom"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.18"
+tower = { version = "0.5", features = ["util"] }

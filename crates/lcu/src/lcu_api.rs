@@ -1,11 +1,11 @@
-use std::{collections::HashMap, time::Duration};
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use reqwest::{Client, Url};
+use reqwest_websocket::{Message, RequestBuilderExt, WebSocket};
 use serde::de::DeserializeOwned;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
-use reqwest_websocket::{RequestBuilderExt, WebSocket, Message};
+use std::{collections::HashMap, time::Duration};
 
 use crate::{
     builds::{ItemBuild, Rune},
@@ -328,5 +328,7 @@ pub fn make_sub_msg() -> Message {
 }
 
 pub fn make_champion_avatar_url(endpoint: &String, id: u64) -> Url {
-    format!("https://{endpoint}/lol-game-data/assets/v1/champion-icons/{id}.png").parse::<Url>().unwrap()
+    format!("https://{endpoint}/lol-game-data/assets/v1/champion-icons/{id}.png")
+        .parse::<Url>()
+        .unwrap()
 }

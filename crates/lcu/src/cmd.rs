@@ -50,12 +50,11 @@ pub fn get_cmd_output() -> Result<CommandLineOutput, ()> {
 
     match ps.run(LCU_COMMAND) {
         Ok(out) => {
-            let output = out.stdout();
-
             #[cfg(not(debug_assertions))]
-            info!("output: {:?}", &output);
-            if output.is_some() {
-                return match_stdout(&String::from(output.unwrap()));
+            info!("output: {:?}", out.stdout());
+
+            if let Some(output) = out.stdout() {
+                return Ok(match_stdout(output.as_str()));
             }
         }
         Err(err) => error!("cmd error: {:?}", err),
@@ -65,7 +64,7 @@ pub fn get_cmd_output() -> Result<CommandLineOutput, ()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn get_cmd_output() -> Result<CommandLineOutput, ()>{
+pub fn get_cmd_output() -> Result<CommandLineOutput, ()> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
 
@@ -107,7 +106,7 @@ pub fn get_cmd_output() -> Result<CommandLineOutput, ()>{
                 }
                 Err(e) => {
                     info!("[cmd::get_cmd_output] {:?}", e);
-                    return Err(())
+                    return Err(());
                 }
             }
         }
@@ -187,8 +186,13 @@ pub async fn spawn_apply_rune(token: &String, port: &String, perk: &String) -> a
 }
 
 #[cfg(not(target_os = "windows"))]
-pub async fn spawn_apply_rune(_perk: String) -> anyhow::Result<()> {
+pub async fn spawn_apply_rune(_token: &String, _port: &String, _perk: &String) -> anyhow::Result<()> {
     Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub async fn check_if_server_ready() -> anyhow::Result<bool> {
+    Ok(true)
 }
 
 #[cfg(target_os = "windows")]
@@ -199,7 +203,7 @@ pub async fn check_if_server_ready() -> anyhow::Result<bool> {
 
     let CommandLineOutput {
         dir, is_tencent, ..
-    } = get_cmd_output();
+    } = get_cmd_output().map_err(|_| Error::new(ErrorKind::Other, "Could not read League client command line."))?;
 
     if dir.is_empty() {
         info!("[cmd::check_if_tencent_server_ready] cannot get lcu install dir");
@@ -232,7 +236,8 @@ pub async fn test_connectivity() -> anyhow::Result<bool> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let CommandLineOutput { port, token, .. } = get_cmd_output();
+    let CommandLineOutput { port, token, .. } =
+        get_cmd_output().map_err(|_| Error::new(ErrorKind::Other, "Could not read League client command line."))?;
 
     let stdout = Command::new("./LeagueClient.exe")
         .args(["test", &token, &port])
