@@ -2,7 +2,8 @@ use std::{
     collections::HashMap,
     fs,
     io::{self, Cursor},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use anyhow::{anyhow, Context};
@@ -17,7 +18,12 @@ use tar::Archive;
 
 use crate::builds::{self, BuildData, ItemBuild};
 
-pub const SERVICE_URL: &str = "http://150.230.215.177:3030";
+const BUILD_SERVER_URL: &str = env!("CHAMPR_BUILD_SERVER_URL");
+const DATA_DRAGON_BASE_URL: &str = "https://ddragon.leagueoflegends.com";
+const DEFAULT_LOCAL_SERVICE_URL: &str = "http://127.0.0.1:3030";
+const SERVER_URL_ENV_KEY: &str = "CHAMPR_SERVER_URL";
+
+static SERVICE_URL: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub enum FetchError {
@@ -54,19 +60,152 @@ pub struct Image {
 
 pub type ChampionsMap = HashMap<String, ChampInfo>;
 
-pub async fn fetch_champion_list() -> Result<ChampionsMap, FetchError> {
-    let url = format!("{SERVICE_URL}/api/data-dragon/champions",);
-    if let Ok(resp) = reqwest::get(url).await {
-        if let Ok(data) = resp.json::<ChampionsMap>().await {
-            return Ok(data);
+#[derive(Debug, Deserialize)]
+struct ChampionListResponse {
+    data: ChampionsMap,
+}
+
+pub fn service_url() -> &'static str {
+    SERVICE_URL.get_or_init(resolve_service_url).as_str()
+}
+
+fn resolve_service_url() -> String {
+    let runtime_env = std::env::var(SERVER_URL_ENV_KEY).ok();
+    let env_file = find_env_file_value(SERVER_URL_ENV_KEY);
+
+    resolve_service_url_from_sources(
+        runtime_env.as_deref(),
+        env_file.as_deref(),
+        cfg!(debug_assertions),
+        BUILD_SERVER_URL,
+    )
+}
+
+fn resolve_service_url_from_sources(
+    runtime_env: Option<&str>,
+    env_file: Option<&str>,
+    use_local_default: bool,
+    build_service_url: &str,
+) -> String {
+    runtime_env
+        .and_then(normalize_service_url)
+        .or_else(|| env_file.and_then(normalize_service_url))
+        .unwrap_or_else(|| {
+            if use_local_default {
+                DEFAULT_LOCAL_SERVICE_URL.to_string()
+            } else {
+                build_service_url.to_string()
+            }
+        })
+}
+
+fn find_env_file_value(key: &str) -> Option<String> {
+    for candidate in env_file_candidates() {
+        if let Some(value) = read_env_value(&candidate, key) {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+fn env_file_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(dir) = std::env::current_dir() {
+        collect_env_candidates(&dir, &mut candidates);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            collect_env_candidates(dir, &mut candidates);
+        }
+    }
+
+    candidates
+}
+
+fn collect_env_candidates(start: &Path, candidates: &mut Vec<PathBuf>) {
+    for ancestor in start.ancestors() {
+        let candidate = ancestor.join(".env");
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+}
+
+fn read_env_value(path: &Path, key: &str) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    parse_env_value(&contents, key)
+}
+
+fn parse_env_value(contents: &str, key: &str) -> Option<String> {
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+
+        if name.trim() != key {
+            continue;
+        }
+
+        return normalize_service_url(value);
+    }
+
+    None
+}
+
+fn normalize_service_url(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_matches(|ch| ch == '"' || ch == '\'');
+    let trimmed = trimmed.trim_end_matches('/');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+async fn fetch_latest_data_dragon_version() -> Result<String, FetchError> {
+    if let Ok(resp) = reqwest::get(format!("{DATA_DRAGON_BASE_URL}/api/versions.json")).await {
+        if let Ok(versions) = resp.json::<Vec<String>>().await {
+            if let Some(version) = versions.into_iter().next() {
+                return Ok(version);
+            }
         }
     }
 
     Err(FetchError::Failed)
 }
 
+async fn fetch_champion_list_for_version(version: &str) -> Result<ChampionsMap, FetchError> {
+    let url = format!("{DATA_DRAGON_BASE_URL}/cdn/{version}/data/en_US/champion.json");
+    if let Ok(resp) = reqwest::get(url).await {
+        if let Ok(data) = resp.json::<ChampionListResponse>().await {
+            return Ok(data.data);
+        }
+    }
+
+    Err(FetchError::Failed)
+}
+
+pub async fn fetch_champion_list() -> Result<ChampionsMap, FetchError> {
+    let version = fetch_latest_data_dragon_version().await?;
+    fetch_champion_list_for_version(&version).await
+}
+
 pub async fn init_for_ui() -> Result<(ChampionsMap, Vec<DataDragonRune>), FetchError> {
-    try_join(fetch_champion_list(), fetch_data_dragon_runes()).await
+    let version = fetch_latest_data_dragon_version().await?;
+    try_join(
+        fetch_champion_list_for_version(&version),
+        fetch_data_dragon_runes_for_version(&version),
+    )
+    .await
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,7 +241,10 @@ pub async fn list_builds_by_alias(
     source: &String,
     champion: &String,
 ) -> Result<Vec<builds::BuildSection>, FetchError> {
-    let url = format!("{SERVICE_URL}/api/source/{source}/champion-alias/{champion}");
+    let url = format!(
+        "{}/api/source/{source}/champion-alias/{champion}",
+        service_url()
+    );
     list_builds(&url).await
 }
 
@@ -110,7 +252,10 @@ pub async fn list_builds_by_id(
     source: &String,
     champion_id: i64,
 ) -> Result<Vec<builds::BuildSection>, FetchError> {
-    let url = format!("{SERVICE_URL}/api/source/{source}/champion-id/{champion_id}");
+    let url = format!(
+        "{}/api/source/{source}/champion-id/{champion_id}",
+        service_url()
+    );
     list_builds(&url).await
 }
 
@@ -151,14 +296,22 @@ pub struct DataDragonRune {
     pub slots: Vec<Slot>,
 }
 
-pub async fn fetch_data_dragon_runes() -> Result<Vec<DataDragonRune>, FetchError> {
-    if let Ok(resp) = reqwest::get(format!("{SERVICE_URL}/api/data-dragon/runes")).await {
+async fn fetch_data_dragon_runes_for_version(
+    version: &str,
+) -> Result<Vec<DataDragonRune>, FetchError> {
+    let url = format!("{DATA_DRAGON_BASE_URL}/cdn/{version}/data/en_US/runesReforged.json");
+    if let Ok(resp) = reqwest::get(url).await {
         if let Ok(data) = resp.json::<Vec<DataDragonRune>>().await {
             return Ok(data);
         }
     }
 
     Err(FetchError::Failed)
+}
+
+pub async fn fetch_data_dragon_runes() -> Result<Vec<DataDragonRune>, FetchError> {
+    let version = fetch_latest_data_dragon_version().await?;
+    fetch_data_dragon_runes_for_version(&version).await
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +477,61 @@ pub async fn download_tar_and_apply_for_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_env_value_supports_quotes_and_comments() {
+        let contents = r#"
+            # ignored
+            CHAMPR_SERVER_URL="http://127.0.0.1:3030/"
+        "#;
+
+        assert_eq!(
+            parse_env_value(contents, SERVER_URL_ENV_KEY).as_deref(),
+            Some("http://127.0.0.1:3030")
+        );
+    }
+
+    #[test]
+    fn resolve_service_url_prefers_runtime_env() {
+        assert_eq!(
+            resolve_service_url_from_sources(
+                Some("http://runtime.local:3030/"),
+                Some("http://env-file.local:3030"),
+                true,
+                "http://build.local:3030",
+            ),
+            "http://runtime.local:3030"
+        );
+    }
+
+    #[test]
+    fn resolve_service_url_prefers_env_file_over_defaults() {
+        assert_eq!(
+            resolve_service_url_from_sources(
+                None,
+                Some("http://env-file.local:3030/"),
+                true,
+                "http://build.local:3030",
+            ),
+            "http://env-file.local:3030"
+        );
+    }
+
+    #[test]
+    fn resolve_service_url_uses_local_default_for_debug_runs() {
+        assert_eq!(
+            resolve_service_url_from_sources(None, None, true, "http://build.local:3030"),
+            DEFAULT_LOCAL_SERVICE_URL
+        );
+    }
+
+    #[test]
+    fn resolve_service_url_uses_build_url_for_packaged_runs() {
+        assert_eq!(
+            resolve_service_url_from_sources(None, None, false, "http://build.local:3030"),
+            "http://build.local:3030"
+        );
+    }
 
     #[tokio::test]
     async fn apply_builds_for_riot_server() -> anyhow::Result<()> {
