@@ -23,7 +23,7 @@ lazy_static! {
     static ref DIR_REGEXP: regex::Regex =
         regex::Regex::new(r#"--install-directory=(.*?)""#).unwrap();
     static ref MAC_DIR_REGEXP: regex::Regex =
-        regex::Regex::new(r"--install-directory=([^\s]+).*?--").unwrap();
+        regex::Regex::new(r#"--install-directory=(.*?)(?:\s--|$)"#).unwrap();
 }
 
 pub fn make_auth_url(token: &String, port: &String) -> String {
@@ -69,7 +69,9 @@ fn run_powershell(
 }
 
 #[cfg(target_os = "windows")]
-fn run_powershell_direct(command: &str) -> Result<powershell_script::Output, powershell_script::PsError> {
+fn run_powershell_direct(
+    command: &str,
+) -> Result<powershell_script::Output, powershell_script::PsError> {
     use powershell_script::PsScriptBuilder;
 
     let ps = PsScriptBuilder::new()
@@ -83,7 +85,9 @@ fn run_powershell_direct(command: &str) -> Result<powershell_script::Output, pow
 }
 
 #[cfg(target_os = "windows")]
-fn run_powershell_elevated(command: &str) -> Result<powershell_script::Output, powershell_script::PsError> {
+fn run_powershell_elevated(
+    command: &str,
+) -> Result<powershell_script::Output, powershell_script::PsError> {
     use nanoid::nanoid;
     use powershell_script::{Output, PsError};
     use std::fs;
@@ -189,66 +193,91 @@ pub fn get_lcu_process_id() -> Option<u32> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn get_lcu_process_id() -> Option<u32> {
-    None
+    get_non_windows_lcu_process().ok().map(|(pid, _)| pid)
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn get_cmd_output() -> Result<CommandLineOutput, ()> {
-    use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
+    let (_, command) = get_non_windows_lcu_process()?;
+    let mut output = match_stdout(&command);
+    output.dir = get_non_windows_install_dir(&command);
+    Ok(output)
+}
 
-    let cmd_str = r#"ps -A | grep LeagueClientUx | grep remoting-auth-token="#;
-    let mut cmd = Command::new("sh")
-        .args(["-c", cmd_str])
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+#[cfg(not(target_os = "windows"))]
+fn get_non_windows_lcu_process() -> Result<(u32, String), ()> {
+    use std::process::Command;
 
-    let mut auth_url = String::new();
-    let mut token = String::new();
-    let mut port = String::new();
-    let mut dir = String::new();
-    let mut is_tencent = false;
-    {
-        let stdout = cmd.stdout.as_mut().unwrap();
-        let stdout_reader = BufReader::new(stdout);
-        let stdout_lines = stdout_reader.lines();
+    let output = Command::new("ps")
+        .args(["axww", "-o", "pid=", "-o", "command="])
+        .output()
+        .map_err(|err| {
+            info!("[cmd::get_non_windows_lcu_process] {:?}", err);
+            ()
+        })?;
 
-        for line in stdout_lines {
-            match line {
-                Ok(s) => {
-                    if s.contains("--app-port=") {
-                        CommandLineOutput {
-                            auth_url,
-                            is_tencent,
-                            token,
-                            port,
-                            ..
-                        } = match_stdout(&s);
-                        dir = if let Some(dir_match) = MAC_DIR_REGEXP.find(&s) {
-                            dir_match.as_str().replace(DIR_KEY, "").replace(" --", "")
-                        } else {
-                            "".to_string()
-                        };
-                        break;
-                    }
-                }
-                Err(e) => {
-                    info!("[cmd::get_cmd_output] {:?}", e);
-                    return Err(());
-                }
-            }
+    if !output.status.success() {
+        info!(
+            "[cmd::get_non_windows_lcu_process] ps exited with {:?}",
+            output.status
+        );
+        return Err(());
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(parse_non_windows_lcu_process)
+        .ok_or(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn parse_non_windows_lcu_process(line: &str) -> Option<(u32, String)> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let mut parts = line.splitn(2, char::is_whitespace);
+    let pid = parts.next()?.trim().parse::<u32>().ok()?;
+    let command = parts.next()?.trim_start();
+
+    if !command.contains("LeagueClientUx") || !command.contains(TOKEN_KEY) {
+        return None;
+    }
+
+    Some((pid, command.to_string()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_non_windows_install_dir(command: &str) -> String {
+    MAC_DIR_REGEXP
+        .captures(command)
+        .and_then(|captures| captures.get(1))
+        .map(|dir_match| unescape_non_windows_arg(dir_match.as_str().trim_matches('"')))
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn unescape_non_windows_arg(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut escaped = false;
+
+    for ch in value.chars() {
+        if escaped {
+            output.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            output.push(ch);
         }
     }
-    cmd.wait().unwrap();
 
-    Ok(CommandLineOutput {
-        auth_url,
-        is_tencent,
-        token,
-        port,
-        dir,
-    })
+    if escaped {
+        output.push('\\');
+    }
+
+    output
 }
 
 pub fn match_stdout(stdout: &str) -> CommandLineOutput {
@@ -315,7 +344,11 @@ pub async fn spawn_apply_rune(token: &String, port: &String, perk: &String) -> a
 }
 
 #[cfg(not(target_os = "windows"))]
-pub async fn spawn_apply_rune(_token: &String, _port: &String, _perk: &String) -> anyhow::Result<()> {
+pub async fn spawn_apply_rune(
+    _token: &String,
+    _port: &String,
+    _perk: &String,
+) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -332,7 +365,12 @@ pub async fn check_if_server_ready() -> anyhow::Result<bool> {
 
     let CommandLineOutput {
         dir, is_tencent, ..
-    } = get_cmd_output().map_err(|_| Error::new(ErrorKind::Other, "Could not read League client command line."))?;
+    } = get_cmd_output().map_err(|_| {
+        Error::new(
+            ErrorKind::Other,
+            "Could not read League client command line.",
+        )
+    })?;
 
     if dir.is_empty() {
         info!("[cmd::check_if_tencent_server_ready] cannot get lcu install dir");
@@ -365,8 +403,12 @@ pub async fn test_connectivity() -> anyhow::Result<bool> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let CommandLineOutput { port, token, .. } =
-        get_cmd_output().map_err(|_| Error::new(ErrorKind::Other, "Could not read League client command line."))?;
+    let CommandLineOutput { port, token, .. } = get_cmd_output().map_err(|_| {
+        Error::new(
+            ErrorKind::Other,
+            "Could not read League client command line.",
+        )
+    })?;
 
     let stdout = Command::new("./LeagueClient.exe")
         .args(["test", &token, &port])
@@ -419,6 +461,24 @@ pub fn update_cmd_output_task(output: &Arc<Mutex<CommandLineOutput>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parses_non_windows_process_output() {
+        let line = "12345 /Applications/LeagueClientUx.app/Contents/MacOS/LeagueClientUx --app-port=52341 --install-directory=/Applications/League\\ of\\ Legends.app/Contents/LoL --remoting-auth-token=secret --region=NA1";
+
+        let (pid, command) = parse_non_windows_lcu_process(line).unwrap();
+        let mut output = match_stdout(&command);
+        output.dir = get_non_windows_install_dir(&command);
+
+        assert_eq!(pid, 12345);
+        assert_eq!(output.port, "52341");
+        assert_eq!(output.token, "secret");
+        assert_eq!(
+            output.dir,
+            "/Applications/League of Legends.app/Contents/LoL"
+        );
+    }
 
     #[tokio::test]
     async fn run_cmd() {

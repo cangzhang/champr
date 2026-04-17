@@ -8,9 +8,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use kv_log_macro::{info, warn};
-use slint::{
-    ComponentHandle, Image, ModelRc, SharedPixelBuffer, SharedString, VecModel, Weak,
-};
+use slint::{ComponentHandle, Image, ModelRc, SharedPixelBuffer, SharedString, VecModel, Weak};
 
 use lcu::{
     builds::Rune,
@@ -91,7 +89,9 @@ fn main() {
                 let w = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = w.upgrade() {
-                        win.set_apply_status(SharedString::from("League Client directory not found"));
+                        win.set_apply_status(SharedString::from(
+                            "League Client directory not found",
+                        ));
                     }
                 });
                 return;
@@ -200,10 +200,7 @@ fn main() {
 //  Task: fetch sources + champions + runes metadata at startup
 // ---------------------------------------------------------------------------
 
-async fn fetch_sources_task(
-    sources_weak: Weak<SourcesWindow>,
-    state: SharedState,
-) {
+async fn fetch_sources_task(sources_weak: Weak<SourcesWindow>, state: SharedState) {
     match web::init_for_ui().await {
         Ok((champions_map, _runes_meta)) => {
             // Store champions map in shared state
